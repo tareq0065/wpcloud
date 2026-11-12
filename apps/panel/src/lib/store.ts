@@ -102,9 +102,9 @@ export function getNextFreePreviewPort(sites: SiteRecord[]): number {
   const used = new Set(
     sites
       .map((s) => s.previewPort)
-      .filter((p): p is number => typeof p === "number" && p > 0)
+      .filter((p): p is number => typeof p === "number" && p >= 38080)
   );
-  let port = 8081;
+  let port = 38081;
   while (used.has(port)) {
     port++;
   }
@@ -124,16 +124,16 @@ export async function getDb(): Promise<PanelDatabase> {
     const raw = await fs.readFile(dbPath, "utf8");
     const parsed = JSON.parse(raw) as PanelDatabase;
 
-    // Backfill previewPort for any existing sites that don't have one allocated
+    // Backfill or migrate previewPort to safe custom high-range (38081+) to avoid 8080/8081 conflicts
     let backfilled = false;
-    let nextPort = 8081;
+    let nextPort = 38081;
     const used = new Set(
       parsed.sites
         .map((s) => s.previewPort)
-        .filter((p): p is number => typeof p === "number" && p > 0)
+        .filter((p): p is number => typeof p === "number" && p >= 38080)
     );
     for (const site of parsed.sites) {
-      if (!site.previewPort) {
+      if (!site.previewPort || site.previewPort < 38080) {
         while (used.has(nextPort)) {
           nextPort++;
         }

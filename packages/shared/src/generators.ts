@@ -482,7 +482,7 @@ if (!defined('ABSPATH')) {
 
 $is_preview = (
     ${portCondition}(isset($_SERVER['HTTP_X_WPCLOUD_PREVIEW']) && $_SERVER['HTTP_X_WPCLOUD_PREVIEW'] === '1') ||
-    (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] >= 8080 && (int)$_SERVER['SERVER_PORT'] <= 8200)
+    (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] >= 38080 && (int)$_SERVER['SERVER_PORT'] <= 38200)
 );
 
 if ($is_preview) {

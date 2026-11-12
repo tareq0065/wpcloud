@@ -137,17 +137,17 @@ test("generateNginxSiteConfig includes dedicated instant IP preview port block",
     wpcloudRoot: "/opt/wpcloud",
     phpVersion: "8.3",
     sslEnabled: false,
-    previewPort: 8081,
+    previewPort: 38081,
     options,
   });
 
-  assert.match(conf, /listen 8081;/);
+  assert.match(conf, /listen 38081;/);
   assert.match(conf, /fastcgi_param HTTP_X_WPCLOUD_PREVIEW "1";/);
   assert.match(conf, /access_log \/opt\/wpcloud\/sites\/previewtest\.com\/logs\/preview_access\.log;/);
 });
 
 test("generateWpPreviewMuPlugin filters home and siteurl and disables canonical redirect", () => {
-  const mu = generateWpPreviewMuPlugin("previewtest.com", 8081);
+  const mu = generateWpPreviewMuPlugin("previewtest.com", 38081);
   assert.match(mu, /Plugin Name: WPCloud Instant IP Preview Helper/);
   assert.match(mu, /add_filter\('option_home'/);
   assert.match(mu, /add_filter\('option_siteurl'/);
