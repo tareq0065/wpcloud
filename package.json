@@ -1,0 +1,22 @@
+{
+  "name": "wpcloud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted WordPress, Nginx, PHP-FPM & Mail Manager for Ubuntu 24.04 VPS",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace=@wpcloud/panel run dev",
+    "build": "npm --workspace=@wpcloud/shared run build && npm --workspace=@wpcloud/agent run build && npm --workspace=@wpcloud/panel run build",
+    "start": "npm --workspace=@wpcloud/panel run start",
+    "agent": "npm --workspace=@wpcloud/agent run start",
+    "typecheck": "npm --workspace=@wpcloud/shared run typecheck && npm --workspace=@wpcloud/agent run typecheck && npm --workspace=@wpcloud/panel run typecheck",
+    "test": "node --test packages/shared/test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
+

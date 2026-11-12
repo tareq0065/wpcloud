@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build Outputs & Bundles
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Local Environment & Secrets
+.env
+.env*.local
+*.env
+secrets.env
+config.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime directories & site data (root-level only)
+.wpcloud-runtime/
+/uploads/
+/backups/
+/sites/
+
+# SSL & Security keys / certificates
+*.pem
+*.key
+*.crt
+*.cert
+
+# Editor & OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.history/
+.vscode/
+.idea/
+
+# Testing & Coverage
+coverage/
+.nyc_output/

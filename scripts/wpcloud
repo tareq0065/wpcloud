@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# wpcloud — System Administration CLI
+# Commands: status | doctor | reset-password | update-node
+# ==============================================================================
+set -euo pipefail
+
+WPCLOUD_ROOT="${WPCLOUD_ROOT:-/opt/wpcloud}"
+CMD="${1:-status}"
+
+case "${CMD}" in
+  status)
+    echo "=== WPCloud Status (Root: ${WPCLOUD_ROOT}) ==="
+    systemctl status wpcloud-agent.service wpcloud-panel.service --no-pager || true
+    ;;
+  doctor)
+    echo "=== WPCloud Non-Interference & Health Doctor ==="
+    echo "1. Checking nginx configuration syntax (nginx -t)..."
+    nginx -t
+    echo "2. Checking /opt/wpcloud directory structure..."
+    ls -la "${WPCLOUD_ROOT}" || true
+    echo "3. Checking active WordPress vhosts in ${WPCLOUD_ROOT}/nginx/sites/..."
+    ls -la "${WPCLOUD_ROOT}/nginx/sites/" || true
+    ;;
+  reset-password)
+    NEW_PASS=$(openssl rand -base64 12)
+    echo "Resetting WPCloud admin password..."
+    export WPCLOUD_NEW_ADMIN_PASSWORD="${NEW_PASS}"
+    echo "New Admin Password: ${NEW_PASS}"
+    echo "(Update applied in ${WPCLOUD_ROOT}/config/secrets.env — restarting panel)"
+    if [[ -f "${WPCLOUD_ROOT}/config/secrets.env" ]]; then
+      sed -i "s|^WPCLOUD_INITIAL_ADMIN_PASSWORD=.*|WPCLOUD_INITIAL_ADMIN_PASSWORD=${NEW_PASS}|" "${WPCLOUD_ROOT}/config/secrets.env"
+      systemctl restart wpcloud-panel.service || true
+    fi
+    ;;
+  update-node)
+    SOURCE_NODE="${2:-$(command -v node)}"
+    cp -f "${SOURCE_NODE}" "${WPCLOUD_ROOT}/runtime/bin/node"
+    chmod 755 "${WPCLOUD_ROOT}/runtime/bin/node"
+    echo "Updated ${WPCLOUD_ROOT}/runtime/bin/node to $(${WPCLOUD_ROOT}/runtime/bin/node -v)"
+    systemctl restart wpcloud-agent.service wpcloud-panel.service || true
+    ;;
+  restart)
+    echo "Restarting WPCloud services..."
+    systemctl restart wpcloud-agent.service wpcloud-panel.service
+    echo "WPCloud services restarted."
+    ;;
+  logs)
+    echo "Tailing WPCloud services logs (Ctrl+C to exit)..."
+    journalctl -u wpcloud-agent.service -u wpcloud-panel.service -f
+    ;;
+  *)
+    echo "Usage: sudo wpcloud {status|doctor|restart|logs|reset-password|update-node [path-to-node]}"
+    exit 1
+    ;;
+esac
+
