@@ -1096,6 +1096,18 @@ export default function WpCloudAppPage() {
                           </td>
                           <td className="px-4 py-4 text-right">
                             <div className="inline-flex items-center gap-2">
+                              {site.previewPort && overview?.settings.vpsIpv4 && (
+                                <a
+                                  href={`http://${overview.settings.vpsIpv4}:${site.previewPort}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={`Instant preview on port ${site.previewPort}`}
+                                  className="inline-flex items-center gap-1 rounded-xl border border-indigo-200 bg-indigo-50/70 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                                >
+                                  <Sparkles className="h-3 w-3 text-indigo-600" />
+                                  Preview
+                                </a>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => setSelectedSiteId(site.id)}

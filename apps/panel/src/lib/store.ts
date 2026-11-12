@@ -98,6 +98,19 @@ function createInitialDatabase(): PanelDatabase {
   };
 }
 
+export function getNextFreePreviewPort(sites: SiteRecord[]): number {
+  const used = new Set(
+    sites
+      .map((s) => s.previewPort)
+      .filter((p): p is number => typeof p === "number" && p > 0)
+  );
+  let port = 8081;
+  while (used.has(port)) {
+    port++;
+  }
+  return port;
+}
+
 export async function getDb(): Promise<PanelDatabase> {
   if (globalForStore.wpcloudDbCache) {
     return globalForStore.wpcloudDbCache;
@@ -110,6 +123,29 @@ export async function getDb(): Promise<PanelDatabase> {
   try {
     const raw = await fs.readFile(dbPath, "utf8");
     const parsed = JSON.parse(raw) as PanelDatabase;
+
+    // Backfill previewPort for any existing sites that don't have one allocated
+    let backfilled = false;
+    let nextPort = 8081;
+    const used = new Set(
+      parsed.sites
+        .map((s) => s.previewPort)
+        .filter((p): p is number => typeof p === "number" && p > 0)
+    );
+    for (const site of parsed.sites) {
+      if (!site.previewPort) {
+        while (used.has(nextPort)) {
+          nextPort++;
+        }
+        site.previewPort = nextPort;
+        used.add(nextPort);
+        backfilled = true;
+      }
+    }
+    if (backfilled) {
+      await saveDb(parsed);
+    }
+
     globalForStore.wpcloudDbCache = parsed;
     return parsed;
   } catch {
@@ -152,6 +188,7 @@ export async function createNewWordPressSite(
 
   const slug = input.domain.replace(/[^a-z0-9]/gi, "").slice(0, 14) || "wpsite";
   const now = new Date().toISOString();
+  const previewPort = getNextFreePreviewPort(db.sites);
   const generatedAdminPass =
     input.wpAdminPassword ||
     `WP_${crypto.randomBytes(6).toString("base64url")}!9`;
@@ -175,6 +212,7 @@ export async function createNewWordPressSite(
     phpVersion: syncedPhpOptions.phpVersion,
     phpOptions: syncedPhpOptions,
     nginxOptions: input.nginxOptions,
+    previewPort,
     dbName: input.dbName || `wp_${slug}`,
     dbUser: input.dbUser || `u_${slug}`,
     dbPassword: input.dbPassword || `db_${crypto.randomBytes(9).toString("hex")}`,
@@ -211,6 +249,7 @@ export async function createNewWordPressSite(
     domain: newSite.domain,
     phpVersion: newSite.phpVersion,
     sslEnabled: false,
+    previewPort: newSite.previewPort,
     options: newSite.nginxOptions,
   });
 
@@ -280,6 +319,7 @@ export async function importExistingWordPressSite(
 
   const slug = input.domain.replace(/[^a-z0-9]/gi, "").slice(0, 14) || "wpimp";
   const now = new Date().toISOString();
+  const previewPort = getNextFreePreviewPort(db.sites);
   const syncedPhpOptions: PhpPoolOptions = {
     ...input.phpOptions,
     uploadMaxFilesizeMb: input.nginxOptions.clientMaxBodySizeMb,
@@ -299,6 +339,7 @@ export async function importExistingWordPressSite(
     phpVersion: syncedPhpOptions.phpVersion,
     phpOptions: syncedPhpOptions,
     nginxOptions: input.nginxOptions,
+    previewPort,
     dbName: input.dbName || `wp_${slug}`,
     dbUser: input.dbUser || `u_${slug}`,
     dbPassword: input.dbPassword || `db_${crypto.randomBytes(9).toString("hex")}`,
@@ -347,6 +388,7 @@ export async function importExistingWordPressSite(
     domain: importedSite.domain,
     phpVersion: importedSite.phpVersion,
     sslEnabled: false,
+    previewPort: importedSite.previewPort,
     options: importedSite.nginxOptions,
   });
 
@@ -422,6 +464,7 @@ export async function updateSiteNginxConfig(
     domain: site.domain,
     phpVersion: site.phpVersion,
     sslEnabled: site.sslEnabled,
+    previewPort: site.previewPort,
     options: nginxOptions,
   });
 
@@ -556,6 +599,7 @@ export async function issueSiteLetsEncryptSsl(
     domain: site.domain,
     phpVersion: site.phpVersion,
     sslEnabled: true,
+    previewPort: site.previewPort,
     options: site.nginxOptions,
   });
 
@@ -744,8 +788,27 @@ export async function getSiteGeneratedConfigs(siteId: string): Promise<{
     wpcloudRoot: "/opt/wpcloud",
     phpVersion: site.phpVersion,
     sslEnabled: site.sslEnabled,
+    previewPort: site.previewPort,
     options: site.nginxOptions,
   });
+
+  // Ensure Nginx config on disk and preview mu-plugin are synchronized
+  if (site.previewPort && site.status === "running") {
+    try {
+      const currentDiskNginx = await fs.readFile(site.nginxConfigPath, "utf8");
+      if (!currentDiskNginx.includes(`listen ${site.previewPort}`)) {
+        await engine.writeAndReloadNginxSite({
+          domain: site.domain,
+          phpVersion: site.phpVersion,
+          sslEnabled: site.sslEnabled,
+          previewPort: site.previewPort,
+          options: site.nginxOptions,
+        });
+      }
+    } catch {
+      // ignore in local or before creation
+    }
+  }
 
   const phpPoolConfig = generatePhpFpmPoolConfig({
     domain: site.domain,

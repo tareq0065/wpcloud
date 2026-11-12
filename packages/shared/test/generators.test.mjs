@@ -7,6 +7,7 @@ import {
   generateNginxMasterInclude,
   generateNginxSiteConfig,
   generatePhpFpmPoolConfig,
+  generateWpPreviewMuPlugin,
   generateWpSmtpMuPlugin,
   buildSiteDnsInstructions,
   buildMailDomainDnsInstructions,
@@ -127,4 +128,30 @@ test("buildMailDomainDnsInstructions outputs MX, SPF, 2048-bit DKIM, DMARC, and 
 
   assert.ok(records.some((r) => r.type === "MX" && r.value === "10 mail.client.org"));
   assert.ok(records.some((r) => r.type === "PTR" && r.value === "mail.client.org"));
+});
+
+test("generateNginxSiteConfig includes dedicated instant IP preview port block", () => {
+  const options = NginxSiteOptionsSchema.parse({});
+  const conf = generateNginxSiteConfig({
+    domain: "previewtest.com",
+    wpcloudRoot: "/opt/wpcloud",
+    phpVersion: "8.3",
+    sslEnabled: false,
+    previewPort: 8081,
+    options,
+  });
+
+  assert.match(conf, /listen 8081;/);
+  assert.match(conf, /fastcgi_param HTTP_X_WPCLOUD_PREVIEW "1";/);
+  assert.match(conf, /access_log \/opt\/wpcloud\/sites\/previewtest\.com\/logs\/preview_access\.log;/);
+});
+
+test("generateWpPreviewMuPlugin filters home and siteurl and disables canonical redirect", () => {
+  const mu = generateWpPreviewMuPlugin("previewtest.com", 8081);
+  assert.match(mu, /Plugin Name: WPCloud Instant IP Preview Helper/);
+  assert.match(mu, /add_filter\('option_home'/);
+  assert.match(mu, /add_filter\('option_siteurl'/);
+  assert.match(mu, /remove_action\('template_redirect', 'redirect_canonical'\)/);
+  assert.match(mu, /add_filter\('redirect_canonical', '__return_false'/);
+  assert.match(mu, /previewtest\.com/);
 });

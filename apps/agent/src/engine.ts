@@ -10,6 +10,7 @@ import {
   generateNginxMasterInclude,
   generateNginxSiteConfig,
   generatePhpFpmPoolConfig,
+  generateWpPreviewMuPlugin,
   generateWpSmtpMuPlugin,
   type DnsCheckReport,
   type EmailProtectionInspection,
@@ -246,6 +247,7 @@ export class AgentEngine {
     domain: string;
     phpVersion: string;
     sslEnabled: boolean;
+    previewPort?: number;
     options: NginxSiteOptions;
   }): Promise<{ configPath: string; configContent: string }> {
     await this.ensureDirectoryLayout();
@@ -263,6 +265,7 @@ export class AgentEngine {
       phpVersion: params.phpVersion,
       sslEnabled: params.sslEnabled,
       options: params.options,
+      previewPort: params.previewPort,
     });
 
     const configPath = path.join(
@@ -301,6 +304,20 @@ export class AgentEngine {
     }
 
     await this.runSafeCommand("nginx.reload", "systemctl", ["reload", "nginx"]);
+
+    // Ensure preview mu-plugin is installed in the WordPress site
+    await this.writeWpPreviewMuPlugin(params.domain, params.previewPort);
+
+    // If on Linux and previewPort is active, ensure UFW allows the port
+    if (params.previewPort && params.previewPort > 0) {
+      await this.runSafeCommand(
+        "firewall.preview_port",
+        "ufw",
+        ["allow", `${params.previewPort}/tcp`, "comment", `WPCloud Preview ${params.domain}`],
+        { allowFail: true }
+      );
+    }
+
     return { configPath, configContent };
   }
 
@@ -492,6 +509,9 @@ export class AgentEngine {
         "utf8"
       );
     }
+
+    // Install instant IP preview helper mu-plugin
+    await this.writeWpPreviewMuPlugin(site.domain, site.previewPort);
   }
 
   /**
@@ -757,6 +777,9 @@ export class AgentEngine {
       [publicDir, "-type", "f", "-exec", "chmod", "644", "{}", "+"],
       { allowFail: true }
     );
+
+    // Install instant IP preview helper mu-plugin
+    await this.writeWpPreviewMuPlugin(params.domain);
   }
 
   /**
@@ -784,6 +807,34 @@ export class AgentEngine {
 
     const content = generateWpSmtpMuPlugin(domain, smtp);
     await fs.writeFile(muPluginPath, content, "utf8");
+    return muPluginPath;
+  }
+
+  /**
+   * Installs or updates the WPCloud preview helper mu-plugin to prevent WordPress canonical redirects on preview IP.
+   */
+  public async writeWpPreviewMuPlugin(
+    domain: string,
+    previewPort?: number
+  ): Promise<string> {
+    const muPluginDir = path.join(
+      this.wpcloudRoot,
+      "sites",
+      domain,
+      "public",
+      "wp-content",
+      "mu-plugins"
+    );
+    const muPluginPath = path.join(muPluginDir, "wpcloud-preview.php");
+
+    try {
+      await fs.mkdir(muPluginDir, { recursive: true });
+      const content = generateWpPreviewMuPlugin(domain, previewPort);
+      await fs.writeFile(muPluginPath, content, "utf8");
+    } catch {
+      // ignore if site directory not yet created
+    }
+
     return muPluginPath;
   }
 

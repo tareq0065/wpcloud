@@ -66,9 +66,10 @@ fi
 echo "  • Ports ${PANEL_PORT} (Panel) and ${ADMINER_PORT} (Adminer) are verified."
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  echo "  • UFW firewall is active. Allowing TCP ports ${PANEL_PORT} (Panel) and ${ADMINER_PORT} (Adminer)..."
+  echo "  • UFW firewall is active. Allowing TCP ports ${PANEL_PORT} (Panel), ${ADMINER_PORT} (Adminer), and 8080-8200 (Site Previews)..."
   ufw allow "${PANEL_PORT}/tcp" comment "WPCloud Panel" >/dev/null 2>&1 || true
   ufw allow "${ADMINER_PORT}/tcp" comment "WPCloud Adminer" >/dev/null 2>&1 || true
+  ufw allow 8080:8200/tcp comment "WPCloud Site Previews" >/dev/null 2>&1 || true
 fi
 
 # 2. Create /opt/wpcloud folder hierarchy

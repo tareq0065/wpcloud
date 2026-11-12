@@ -393,6 +393,8 @@ export function SiteDetailWorkspace({
   ];
 
   const siteUrl = `${site.sslEnabled ? "https" : "http"}://${site.domain}`;
+  const previewUrl =
+    site.previewPort && vpsIpv4 ? `http://${vpsIpv4}:${site.previewPort}` : null;
 
   return (
     <div className="space-y-6">
@@ -448,6 +450,18 @@ export function SiteDetailWorkspace({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          {previewUrl && (
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noreferrer"
+              title="Preview site directly via VPS IP before DNS cutover without canonical redirect loops"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+              IP Preview (Port {site.previewPort}) <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
           <a
             href={siteUrl}
             target="_blank"
@@ -493,6 +507,66 @@ export function SiteDetailWorkspace({
       {activeTab === "overview" && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
+            {previewUrl && (
+              <div className="rounded-2xl border border-indigo-200/90 bg-gradient-to-r from-indigo-50/80 via-violet-50/50 to-white p-5 shadow-2xs">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="flex items-start gap-3.5">
+                    <div className="rounded-xl bg-indigo-600 p-2.5 text-white shadow-xs">
+                      <Sparkles className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-sm font-bold text-slate-900">
+                          Instant IP Preview URL (Test Before DNS Pointing)
+                        </h2>
+                        <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-700">
+                          Live on Port {site.previewPort}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-600 max-w-2xl leading-relaxed">
+                        Preview and test your WordPress website right now on your Ubuntu VPS without changing any domain DNS records. WPCloud uses a dedicated preview port ({site.previewPort}) and an automated bypass mu-plugin so WordPress will not trigger canonical redirects back to the live domain.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <code className="rounded-lg border border-indigo-200 bg-white px-3 py-1.5 font-mono text-xs font-semibold text-indigo-900 select-all">
+                          {previewUrl}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => copyText("preview_url", previewUrl)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50"
+                        >
+                          {copiedKey === "preview_url" ? (
+                            <Check className="h-3.5 w-3.5 text-emerald-600" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                          {copiedKey === "preview_url" ? "Copied" : "Copy URL"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={previewUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-2xs transition hover:bg-indigo-500"
+                    >
+                      Open Preview <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <a
+                      href={`${previewUrl}/wp-admin`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-white px-3.5 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50"
+                    >
+                      WP Admin Preview <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs">
               <h2 className="text-base font-semibold text-slate-900">
                 WordPress Isolation &amp; Paths inside{" "}
@@ -761,6 +835,20 @@ export function SiteDetailWorkspace({
                   <code className="font-mono">TXT (SPF/DKIM)</code> records
                   untouched so email keeps working.
                 </p>
+                {previewUrl && (
+                  <p className="mt-2 text-xs font-medium text-indigo-700">
+                    💡 Testing before updating DNS? You can preview and edit the site immediately via{" "}
+                    <a
+                      href={previewUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono font-bold underline hover:text-indigo-900"
+                    >
+                      {previewUrl}
+                    </a>
+                    .
+                  </p>
+                )}
               </div>
               <button
                 type="button"

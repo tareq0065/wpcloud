@@ -136,6 +136,7 @@ export interface SiteRecord {
   dnsLastCheckedAt?: string;
   detectedEmailProvider?: string;
   smtpConfig: WpSmtpConfig;
+  previewPort?: number;
   diskUsageMb: number;
   createdAt: string;
   updatedAt: string;

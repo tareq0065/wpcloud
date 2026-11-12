@@ -55,6 +55,7 @@ export function generateNginxSiteConfig(params: {
   sslEnabled: boolean;
   sslCertPath?: string;
   sslKeyPath?: string;
+  previewPort?: number;
   options: NginxSiteOptions;
 }): string {
   const {
@@ -287,6 +288,69 @@ export function generateNginxSiteConfig(params: {
   }
 
   lines.push(`}`, ``);
+
+  // Dedicated preview server block for instant IP-based inspection before DNS cutover
+  if (params.previewPort && params.previewPort > 0) {
+    lines.push(
+      `# ----------------------------------------------------------------------------`,
+      `# WPCloud Instant IP Preview (Port ${params.previewPort})`,
+      `# Allows site inspection via http://<vps-ip>:${params.previewPort}/ before DNS cutover`,
+      `# ----------------------------------------------------------------------------`,
+      `server {`,
+      `    listen ${params.previewPort};`,
+      `    listen [::]:${params.previewPort};`,
+      `    server_name _;`,
+      `    root ${publicDir};`,
+      `    index index.php index.html;`,
+      ``,
+      `    access_log ${logsDir}/preview_access.log;`,
+      `    error_log ${logsDir}/preview_error.log warn;`,
+      ``,
+      `    client_max_body_size ${options.clientMaxBodySizeMb}M;`,
+      ``,
+      `    # Security headers`,
+      `    add_header X-Frame-Options "SAMEORIGIN" always;`,
+      `    add_header X-Content-Type-Options "nosniff" always;`,
+      `    add_header X-WPCloud-Preview "1" always;`,
+      ``,
+      `    # Hardening: block hidden files (.htaccess, .git, .env) and wp-config.php`,
+      `    location ~ /\\.(?!well-known).* {`,
+      `        deny all;`,
+      `    }`,
+      `    location = /wp-config.php {`,
+      `        deny all;`,
+      `    }`,
+      `    location ~* /(?:uploads|files)/.*\\.php$ {`,
+      `        deny all;`,
+      `    }`,
+      ``,
+      `    # WordPress front controller`,
+      `    location / {`,
+      `        try_files $uri $uri/ /index.php?$args;`,
+      `    }`,
+      ``,
+      `    # Isolated per-site PHP-FPM socket with preview indicator flag`,
+      `    location ~ \\.php$ {`,
+      `        include snippets/fastcgi-php.conf;`,
+      `        fastcgi_pass unix:${phpSocket};`,
+      `        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;`,
+      `        fastcgi_param HTTP_X_WPCLOUD_PREVIEW "1";`,
+      `        fastcgi_read_timeout 300s;`,
+      `        fastcgi_buffers 16 16k;`,
+      `        fastcgi_buffer_size 32k;`,
+      `    }`,
+      ``,
+      `    # Static asset handling`,
+      `    location ~* \\.(?:css|js|jpg|jpeg|gif|png|ico|cur|gz|svg|svgz|mp4|ogg|ogv|webm|htc|woff2|woff|webp|avif)$ {`,
+      `        expires 1h;`,
+      `        access_log off;`,
+      `        add_header Cache-Control "public, no-transform";`,
+      `    }`,
+      `}`,
+      ``
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -388,6 +452,96 @@ add_action('phpmailer_init', function ($phpmailer) {
     $phpmailer->From       = '${safeFromEmail}';
     $phpmailer->FromName   = '${safeFromName}';
 }, 999);
+`;
+}
+
+/**
+ * Generates the WordPress MU-Plugin that enables instant IP preview via dedicated port
+ * without triggering WordPress canonical redirect loops back to the apex domain.
+ */
+export function generateWpPreviewMuPlugin(
+  domain: string,
+  previewPort?: number
+): string {
+  const safeDomain = domain.replace(/'/g, "\\'");
+  const portCondition = previewPort
+    ? `(isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === ${previewPort}) || `
+    : "";
+
+  return `<?php
+/**
+ * Plugin Name: WPCloud Instant IP Preview Helper
+ * Description: Enables previewing WordPress sites via VPS IP before DNS propagation, without canonical redirect loops.
+ * Version: 1.0.0
+ * Author: WPCloud Panel
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+$is_preview = (
+    ${portCondition}(isset($_SERVER['HTTP_X_WPCLOUD_PREVIEW']) && $_SERVER['HTTP_X_WPCLOUD_PREVIEW'] === '1') ||
+    (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] >= 8080 && (int)$_SERVER['SERVER_PORT'] <= 8200)
+);
+
+if ($is_preview) {
+    $preview_host = $_SERVER['HTTP_HOST'] ?? '';
+    if (!empty($preview_host)) {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $preview_url = $scheme . '://' . $preview_host;
+
+        // 1. Dynamic home and siteurl override for preview requests
+        add_filter('option_home', function() use ($preview_url) {
+            return $preview_url;
+        }, 9999);
+
+        add_filter('option_siteurl', function() use ($preview_url) {
+            return $preview_url;
+        }, 9999);
+
+        // 2. Disable canonical redirect so WordPress doesn't bounce visitor to the apex domain
+        remove_action('template_redirect', 'redirect_canonical');
+        add_filter('redirect_canonical', '__return_false', 9999);
+
+        // 3. Keep internal HTML links and assets pointed to preview URL
+        add_action('template_redirect', function() use ($preview_url) {
+            ob_start(function($buffer) use ($preview_url) {
+                if (empty($buffer) || !is_string($buffer)) {
+                    return $buffer;
+                }
+                $target_domain = '${safeDomain}';
+                if (!empty($target_domain)) {
+                    $patterns = array(
+                        'https://' . $target_domain,
+                        'http://' . $target_domain,
+                        'https://www.' . $target_domain,
+                        'http://www.' . $target_domain,
+                        '//' . $target_domain,
+                        '//www.' . $target_domain,
+                    );
+                    $buffer = str_replace($patterns, $preview_url, $buffer);
+                }
+                return $buffer;
+            });
+        }, 1);
+
+        // 4. Ensure wp-admin / wp-login redirects stay within preview URL
+        add_filter('wp_redirect', function($location) use ($preview_url) {
+            $target_domain = '${safeDomain}';
+            if (!empty($target_domain) && is_string($location)) {
+                $patterns = array(
+                    'https://' . $target_domain,
+                    'http://' . $target_domain,
+                    'https://www.' . $target_domain,
+                    'http://' . $target_domain,
+                );
+                $location = str_replace($patterns, $preview_url, $location);
+            }
+            return $location;
+        }, 9999);
+    }
+}
 `;
 }
 
