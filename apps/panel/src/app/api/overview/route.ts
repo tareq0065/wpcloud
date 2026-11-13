@@ -1,8 +1,10 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getAgentEngine, getDb } from "@/lib/store";
-import { generateTotpCode } from "@/lib/auth";
+import { generateTotpCode, requireAdminSession } from "@/lib/auth";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
   const db = await getDb();
   const engine = getAgentEngine();
   const metrics = await engine.getServerMetrics();

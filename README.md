@@ -47,12 +47,13 @@ WPCloud is designed specifically to run safely on servers hosting existing produ
 ### Prerequisites on Ubuntu 24.04 LTS:
 - Ubuntu 24.04 LTS VPS (Contabo, Hetzner, DigitalOcean, Linode, AWS, etc.).
 - Root or sudo privileges.
-- Node.js v22+ or v24+ (installed via nvm or package manager).
+- **Node.js `>= 22` and `npm` installed manually beforehand** (e.g. via NodeSource or `nvm`).
+  > **Strict System Runtime Policy:** WPCloud **never** installs, copies, symlinks, or wraps `node`, `npm`, or `npx`, and has **no bundled Node.js fallback**. It always uses your server's existing Node.js & `npm` directly (`npm` runs with an isolated temporary cache during builds so `~/.npm` is never modified by `sudo`). If Node.js `< 22` or `npm` is missing, the installer aborts immediately.
 - Git installed (`sudo apt update && sudo apt install -y git`).
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/tareq0065/wpcloud.git /opt/wpcloud/app
+sudo git clone https://github.com/tareq0065/wpcloud.git /opt/wpcloud/app
 cd /opt/wpcloud/app
 ```
 
@@ -63,12 +64,12 @@ sudo ./scripts/install.sh
 
 What the installer does automatically:
 - Verifies system baseline and validates `nginx -t`.
-- Detects your Node.js runtime and registers `/opt/wpcloud/runtime/bin/node`.
-- Installs any missing runtime packages (PHP 8.1, 8.2, 8.3 FPM, MariaDB, Certbot, WP-CLI).
+- Verifies your manually installed system Node.js (`>= 22`) and `npm` (uses them directly without copying or wrapping binaries).
+- Installs any missing WordPress runtime packages (PHP 8.1, 8.2, 8.3 FPM, MariaDB, Certbot, WP-CLI).
 - Configures UFW firewall rules for panel (`7070`), Adminer (`7071`), and preview ports (`38080:38200`).
-- Compiles the shared TypeScript schemas, agent engine, and Next.js 16 panel.
-- Registers and starts systemd units (`wpcloud-agent.service` and `wpcloud-panel.service`).
-- Generates a random, secure admin password.
+- Installs dependencies via `npm ci` (in an isolated temp cache) and compiles `@wpcloud/shared`, `@wpcloud/agent`, and the Next.js 16 panel.
+- Registers and starts systemd units (`wpcloud-agent.service` and `wpcloud-panel.service`) pointing directly to your system `node` binary.
+- Generates a random, secure admin password on first install (preserved on future updates).
 
 ### 3. Log In to the Panel
 Open in your browser:
@@ -178,7 +179,7 @@ sudo ./scripts/uninstall.sh
 - Stops and disables `wpcloud-panel.service` and `wpcloud-agent.service`.
 - Removes `/usr/local/bin/wpcloud`.
 - Cleans up UFW firewall rules for panel and preview ports (`7070`, `7071`, `38080:38200`).
-- Removes `/opt/wpcloud/app` and `/opt/wpcloud/runtime`.
+- Removes `/opt/wpcloud/app` and `/opt/wpcloud/data` (plus any legacy `/opt/wpcloud/runtime` from older versions).
 - **Leaves `/opt/wpcloud/sites/` and automated Nginx configs completely intact** so client sites remain active.
 
 ### Option B: Full Clean Purge
@@ -190,7 +191,7 @@ sudo ./scripts/uninstall.sh --full
 - Cleans PHP-FPM pool configurations and reloads PHP.
 - Cleans all WPCloud UFW rules.
 - Completely purges `/opt/wpcloud`.
-- **Existing external Next.js apps, PM2, and `/etc/nginx/sites-enabled/` remain 100% untouched.**
+- **Existing external Next.js apps, PM2, Node.js/npm, and `/etc/nginx/sites-enabled/` remain 100% untouched.**
 
 ---
 
@@ -202,8 +203,17 @@ When WPCloud is installed, a CLI helper is registered at `/usr/local/bin/wpcloud
 # Check service status
 sudo wpcloud status
 
-# Health check & Nginx syntax inspection
+# Health check, Nginx syntax, and npm cache ownership inspection
 sudo wpcloud doctor
+
+# Pull latest git changes, rebuild with system Node/npm, and restart services
+sudo wpcloud update
+
+# Rebuild from current /opt/wpcloud/app source and restart services
+sudo wpcloud rebuild
+
+# Point WPCloud systemd units to an upgraded system Node.js binary
+sudo wpcloud update-node [path-to-node]
 
 # Reset admin password
 sudo wpcloud reset-password
@@ -217,22 +227,21 @@ sudo wpcloud logs
 
 ---
 
-## Manual Rebuild & Development
+## Updating WPCloud from Git on Ubuntu
 
-If updating source code on the VPS:
-
+### Option 1: One-Command Update (if cloned in `/opt/wpcloud/app`)
 ```bash
-cd /opt/wpcloud/app
-
-# Pull latest commits
-git fetch origin main && git reset --hard origin/main
-
-# Build shared, agent, and Next.js panel directly
-npm run build
-
-# Restart the management panel
-systemctl restart wpcloud-panel
+sudo wpcloud update
 ```
+This pulls the latest commits (`git pull --ff-only`), updates dependencies cleanly if `package-lock.json` changed (using an isolated temporary npm cache), rebuilds all packages, removes any legacy `/opt/wpcloud/runtime`, and restarts `wpcloud-agent` and `wpcloud-panel`.
+
+### Option 2: Pull Manually & Re-run Installer (from any clone folder)
+```bash
+cd /opt/wpcloud/app   # or your local git clone directory
+git pull origin main
+sudo ./scripts/install.sh
+```
+`install.sh` is idempotent on updates: it preserves your existing `/opt/wpcloud/config/secrets.env` (admin password & session secret), preserves existing WordPress sites and Nginx configs, rebuilds with your system Node.js (`>= 22`) & `npm`, and restarts the services.
 
 ---
 

@@ -7,8 +7,12 @@ import {
   createNewWordPressSite,
   importExistingWordPressSite,
 } from "@/lib/store";
+import { requireAdminSession } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const body = await req.json();
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdminSession } from "@/lib/auth";
 import {
   NginxSiteOptionsSchema,
   PhpPoolOptionsSchema,
@@ -17,9 +18,12 @@ import {
 } from "@/lib/store";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const { id } = await context.params;
     const db = await getDb();
@@ -49,6 +53,9 @@ export async function PATCH(
   req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const { id } = await context.params;
     const body = await req.json();
@@ -103,9 +110,12 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const { id } = await context.params;
     const res = await toggleOrDeleteSite(id, "delete");

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildMailDomainDnsInstructions } from "@wpcloud/shared";
+import { requireAdminSession } from "@/lib/auth";
 import {
   addMailDomain,
   createMailbox,
@@ -8,7 +9,9 @@ import {
   saveDb,
 } from "@/lib/store";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
   const db = await getDb();
   const domainDnsMap: Record<string, ReturnType<typeof buildMailDomainDnsInstructions>> = {};
 
@@ -27,6 +30,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const body = await req.json();
 

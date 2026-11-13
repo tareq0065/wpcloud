@@ -1,10 +1,33 @@
 import crypto from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
 
-const SESSION_SECRET =
-  process.env.WPCLOUD_SESSION_SECRET ||
-  "wpcloud-dev-session-secret-change-in-prod-9f8e7d6c5b4a";
+const globalForAuth = globalThis as unknown as {
+  wpcloudEphemeralSecret?: string;
+};
+
+function getSessionSecret(): string {
+  if (process.env.WPCLOUD_SESSION_SECRET) {
+    return process.env.WPCLOUD_SESSION_SECRET;
+  }
+  if (!globalForAuth.wpcloudEphemeralSecret) {
+    globalForAuth.wpcloudEphemeralSecret = crypto.randomBytes(32).toString("hex");
+  }
+  return globalForAuth.wpcloudEphemeralSecret;
+}
 
 export const SESSION_COOKIE_NAME = "wpcloud_session";
+
+export function requireAdminSession(req: NextRequest): NextResponse | null {
+  const token = req.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const session = verifySessionToken(token);
+  if (!session) {
+    return NextResponse.json(
+      { error: "Authentication required." },
+      { status: 401 }
+    );
+  }
+  return null;
+}
 
 export function hashPassword(password: string, salt?: string): string {
   const actualSalt = salt || crypto.randomBytes(16).toString("hex");
@@ -27,7 +50,7 @@ export function createSessionToken(username: string): string {
     "base64url"
   );
   const sig = crypto
-    .createHmac("sha256", SESSION_SECRET)
+    .createHmac("sha256", getSessionSecret())
     .update(payload)
     .digest("base64url");
   return `${payload}.${sig}`;
@@ -40,7 +63,7 @@ export function verifySessionToken(
   const [payload, sig] = token.split(".");
   if (!payload || !sig) return null;
   const expectedSig = crypto
-    .createHmac("sha256", SESSION_SECRET)
+    .createHmac("sha256", getSessionSecret())
     .update(payload)
     .digest("base64url");
   const sigBuf = Buffer.from(sig);

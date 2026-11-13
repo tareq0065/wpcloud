@@ -171,6 +171,7 @@ export function generateNginxSiteConfig(params: {
     `    server_name ${primaryServerName};`,
     `    root ${publicDir};`,
     `    index index.php index.html;`,
+    `    autoindex off;`,
     ``,
     `    access_log ${logsDir}/access.log;`,
     `    error_log ${logsDir}/error.log warn;`,
@@ -215,39 +216,19 @@ export function generateNginxSiteConfig(params: {
     ``
   );
 
-  // WordPress permalinks
+  // Hardening rules MUST precede `location ~ \.php$` because Nginx evaluates regex locations in file order (first match wins)
   lines.push(
-    `    # WordPress front controller`,
-    `    location / {`,
-    `        try_files $uri $uri/ /index.php?$args;`,
-    `    }`,
-    ``
-  );
-
-  // PHP-FPM FastCGI handler
-  lines.push(
-    `    # Isolated per-site PHP-FPM socket`,
-    `    location ~ \\.php$ {`,
-    `        include snippets/fastcgi-php.conf;`,
-    `        fastcgi_pass unix:${phpSocket};`,
-    `        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;`,
-    `        fastcgi_read_timeout 300s;`,
-    `        fastcgi_buffers 16 16k;`,
-    `        fastcgi_buffer_size 32k;`,
-    `    }`,
-    ``
-  );
-
-  // Hardening rules
-  lines.push(
-    `    # Hardening: block hidden files (.htaccess, .git, .env) and wp-config.php`,
+    `    # Hardening: block hidden files, sensitive WP files, writable-dir PHP, and arbitrary scripts`,
     `    location ~ /\\.(?!well-known).* {`,
     `        deny all;`,
     `    }`,
-    `    location = /wp-config.php {`,
+    `    location ~* ^/(?:wp-config(?:-sample)?\\.php|wp-cli\\.ya?ml|readme\\.html|license\\.txt)$ {`,
     `        deny all;`,
     `    }`,
-    `    location ~* /(?:uploads|files)/.*\\.php$ {`,
+    `    location ~* /(?:uploads|files|blogs\\.dir|upgrade|cache|backups?)/.*\\.(?:php\\d*|phtml|phar|pl|py|rb|cgi|sh|bash)$ {`,
+    `        deny all;`,
+    `    }`,
+    `    location ~* \\.(?:phtml|phar|php[3-8]|pl|py|rb|cgi|sh|bash)$ {`,
     `        deny all;`,
     `    }`
   );
@@ -263,6 +244,30 @@ export function generateNginxSiteConfig(params: {
     );
   }
   lines.push(``);
+
+  // WordPress permalinks
+  lines.push(
+    `    # WordPress front controller`,
+    `    location / {`,
+    `        try_files $uri $uri/ /index.php?$args;`,
+    `    }`,
+    ``
+  );
+
+  // PHP-FPM FastCGI handler
+  lines.push(
+    `    # Isolated per-site PHP-FPM socket`,
+    `    location ~ \\.php$ {`,
+    `        try_files $uri =404;`,
+    `        include snippets/fastcgi-php.conf;`,
+    `        fastcgi_pass unix:${phpSocket};`,
+    `        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;`,
+    `        fastcgi_read_timeout 300s;`,
+    `        fastcgi_buffers 16 16k;`,
+    `        fastcgi_buffer_size 32k;`,
+    `    }`,
+    ``
+  );
 
   if (options.staticCacheDays > 0) {
     lines.push(
@@ -302,6 +307,7 @@ export function generateNginxSiteConfig(params: {
       `    server_name _;`,
       `    root ${publicDir};`,
       `    index index.php index.html;`,
+      `    autoindex off;`,
       ``,
       `    access_log ${logsDir}/preview_access.log;`,
       `    error_log ${logsDir}/preview_error.log warn;`,
@@ -313,14 +319,17 @@ export function generateNginxSiteConfig(params: {
       `    add_header X-Content-Type-Options "nosniff" always;`,
       `    add_header X-WPCloud-Preview "1" always;`,
       ``,
-      `    # Hardening: block hidden files (.htaccess, .git, .env) and wp-config.php`,
+      `    # Hardening: block hidden files, sensitive WP files, writable-dir PHP, and arbitrary scripts`,
       `    location ~ /\\.(?!well-known).* {`,
       `        deny all;`,
       `    }`,
-      `    location = /wp-config.php {`,
+      `    location ~* ^/(?:wp-config(?:-sample)?\\.php|wp-cli\\.ya?ml|readme\\.html|license\\.txt)$ {`,
       `        deny all;`,
       `    }`,
-      `    location ~* /(?:uploads|files)/.*\\.php$ {`,
+      `    location ~* /(?:uploads|files|blogs\\.dir|upgrade|cache|backups?)/.*\\.(?:php\\d*|phtml|phar|pl|py|rb|cgi|sh|bash)$ {`,
+      `        deny all;`,
+      `    }`,
+      `    location ~* \\.(?:phtml|phar|php[3-8]|pl|py|rb|cgi|sh|bash)$ {`,
       `        deny all;`,
       `    }`,
       ``,
@@ -331,6 +340,7 @@ export function generateNginxSiteConfig(params: {
       ``,
       `    # Isolated per-site PHP-FPM socket with preview indicator flag`,
       `    location ~ \\.php$ {`,
+      `        try_files $uri =404;`,
       `        include snippets/fastcgi-php.conf;`,
       `        fastcgi_pass unix:${phpSocket};`,
       `        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;`,
@@ -396,17 +406,20 @@ export function generatePhpFpmPoolConfig(params: {
     `chdir = ${siteDir}/public`,
     `security.limit_extensions = .php`,
     ``,
-    `; Per-site PHP overrides & isolation`,
+    `; Per-site PHP overrides & strict script-execution isolation`,
     `php_admin_value[memory_limit] = ${phpOptions.memoryLimitMb}M`,
     `php_admin_value[max_execution_time] = ${phpOptions.maxExecutionTime}`,
     `php_admin_value[upload_max_filesize] = ${phpOptions.uploadMaxFilesizeMb}M`,
     `php_admin_value[post_max_size] = ${phpOptions.uploadMaxFilesizeMb}M`,
     `php_admin_value[error_log] = ${siteDir}/logs/php-error.log`,
     `php_admin_flag[log_errors] = on`,
+    `php_admin_flag[allow_url_include] = off`,
+    `php_admin_flag[expose_php] = off`,
+    `php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,pcntl_fork,pcntl_signal,pcntl_waitpid,pcntl_wexitstatus,pcntl_wifexited,pcntl_wifsignaled,pcntl_wifstopped,pcntl_wstopsig,pcntl_wtermsig,dl,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid,show_source,highlight_file`,
     `php_admin_value[sys_temp_dir] = ${siteDir}/tmp`,
     `php_admin_value[upload_tmp_dir] = ${siteDir}/tmp`,
     `php_admin_value[session.save_path] = ${siteDir}/tmp`,
-    `php_admin_value[open_basedir] = ${siteDir}/public:${siteDir}/tmp:/tmp:/usr/share/php`,
+    `php_admin_value[open_basedir] = ${siteDir}/public:${siteDir}/tmp:/usr/share/php`,
     ``,
   ].join("\n");
 }

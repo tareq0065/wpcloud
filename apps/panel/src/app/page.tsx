@@ -647,7 +647,6 @@ export default function WpCloudAppPage() {
                     <pre className="mt-2.5 overflow-x-auto rounded-lg bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-200">
                       {`/opt/wpcloud/
 ├─ app/          (Next.js 16 + Agent)
-├─ runtime/bin/  (Copied Node v24.12.0)
 ├─ sites/        (${sites.length} WordPress sites)
 ├─ nginx/sites/  (Automated .conf files)
 ├─ php/8.1..8.3/ (Per-site FPM pools)

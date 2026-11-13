@@ -1,12 +1,126 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # wpcloud — System Administration CLI
-# Commands: status | doctor | reset-password | update-node
+# Commands: status | doctor | restart | logs | reset-password | update | rebuild | update-node
 # ==============================================================================
 set -euo pipefail
 
 WPCLOUD_ROOT="${WPCLOUD_ROOT:-/opt/wpcloud}"
 CMD="${1:-status}"
+
+node_major_version() {
+  local bin="$1"
+  local ver
+  ver=$("${bin}" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo "0")
+  if [[ "${ver}" =~ ^[0-9]+$ ]]; then
+    echo "${ver}"
+  else
+    echo "0"
+  fi
+}
+
+resolve_node_bin() {
+  if command -v node >/dev/null 2>&1; then
+    local sys_node
+    sys_node=$(command -v node)
+    if [[ "$(node_major_version "${sys_node}")" -lt 22 ]]; then
+      echo "[ERROR] System Node.js ($("${sys_node}" -v 2>/dev/null || true)) at ${sys_node} is < 22. Please upgrade Node.js manually." >&2
+      return 1
+    fi
+    echo "${sys_node}"
+    return 0
+  fi
+
+  local invoking_user="${SUDO_USER:-root}"
+  local invoking_home
+  invoking_home=$(getent passwd "${invoking_user}" | cut -d: -f6)
+  local nvm_dir candidate ver
+
+  for nvm_dir in "${invoking_home}/.nvm" "/root/.nvm"; do
+    if [[ -d "${nvm_dir}/versions/node" ]]; then
+      while IFS= read -r candidate; do
+        if [[ -x "${candidate}" ]]; then
+          ver=$(node_major_version "${candidate}")
+          if [[ "${ver}" -ge 22 ]]; then
+            echo "${candidate}"
+            return 0
+          fi
+        fi
+      done < <(find "${nvm_dir}/versions/node" -maxdepth 3 -name node \( -type f -o -type l \) 2>/dev/null | sort -Vr)
+    fi
+  done
+
+  return 1
+}
+
+update_systemd_node_path() {
+  local node_bin="$1"
+  local node_dir
+  node_dir="$(dirname "${node_bin}")"
+  local changed=0
+
+  for unit in /etc/systemd/system/wpcloud-agent.service /etc/systemd/system/wpcloud-panel.service; do
+    if [[ -f "${unit}" ]]; then
+      sed -i "s|^ExecStart=.* ${WPCLOUD_ROOT}/app/|ExecStart=${node_bin} ${WPCLOUD_ROOT}/app/|g" "${unit}"
+      if grep -q '^Environment=PATH=' "${unit}"; then
+        sed -i "s|^Environment=PATH=.*|Environment=PATH=${node_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" "${unit}"
+      else
+        sed -i "/^EnvironmentFile=/a Environment=PATH=${node_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "${unit}"
+      fi
+      changed=1
+    fi
+  done
+
+  rm -rf "${WPCLOUD_ROOT}/runtime"
+  if [[ "${changed}" -eq 1 ]]; then
+    systemctl daemon-reload
+  fi
+}
+
+run_rebuild() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "[ERROR] Please run with sudo: sudo wpcloud rebuild"
+    exit 1
+  fi
+  local source_node node_dir npm_bin isolated_tmp
+  source_node="$(resolve_node_bin || true)"
+  if [[ -z "${source_node}" || ! -x "${source_node}" ]]; then
+    echo "[ERROR] Could not locate manually installed Node.js v22+ binary."
+    exit 1
+  fi
+  node_dir="$(dirname "${source_node}")"
+  npm_bin="${node_dir}/npm"
+  if [[ ! -x "${npm_bin}" ]]; then
+    npm_bin="$(command -v npm || true)"
+  fi
+  if [[ -z "${npm_bin}" || ! -x "${npm_bin}" ]]; then
+    echo "[ERROR] Could not locate matching system npm binary alongside ${source_node}."
+    exit 1
+  fi
+
+  export PATH="${node_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+  isolated_tmp=$(mktemp -d /tmp/wpcloud-rebuild-npm.XXXXXX)
+  trap 'rm -rf "${isolated_tmp:-}"' EXIT
+
+  cd "${WPCLOUD_ROOT}/app"
+  echo "=== Rebuilding WPCloud with system Node (${source_node}) ==="
+  if [[ ! -d "node_modules" || ! -x "node_modules/.bin/tsc" || ! -x "node_modules/.bin/next" ]] || \
+     [[ -f "package-lock.json" && -f "node_modules/.package-lock.json" && "package-lock.json" -nt "node_modules/.package-lock.json" ]]; then
+    if [[ -f "package-lock.json" ]]; then
+      HOME="${isolated_tmp}" npm_config_cache="${isolated_tmp}/npm-cache" npm_config_userconfig="${isolated_tmp}/npmrc" npm_config_update_notifier=false "${npm_bin}" ci --no-audit --no-fund
+    else
+      HOME="${isolated_tmp}" npm_config_cache="${isolated_tmp}/npm-cache" npm_config_userconfig="${isolated_tmp}/npmrc" npm_config_update_notifier=false "${npm_bin}" install --no-audit --no-fund
+    fi
+  fi
+
+  HOME="${isolated_tmp}" NEXT_TELEMETRY_DISABLED=1 ./node_modules/.bin/tsc -p packages/shared/tsconfig.json
+  HOME="${isolated_tmp}" NEXT_TELEMETRY_DISABLED=1 ./node_modules/.bin/tsc -p apps/agent/tsconfig.json
+  HOME="${isolated_tmp}" NEXT_TELEMETRY_DISABLED=1 ./node_modules/.bin/next build apps/panel --webpack
+
+  update_systemd_node_path "${source_node}"
+  systemctl restart wpcloud-agent.service wpcloud-panel.service
+  echo "WPCloud rebuilt and services restarted cleanly."
+}
 
 case "${CMD}" in
   status)
@@ -21,6 +135,19 @@ case "${CMD}" in
     ls -la "${WPCLOUD_ROOT}" || true
     echo "3. Checking active WordPress vhosts in ${WPCLOUD_ROOT}/nginx/sites/..."
     ls -la "${WPCLOUD_ROOT}/nginx/sites/" || true
+    INVOKING_USER="${SUDO_USER:-root}"
+    INVOKING_HOME=$(getent passwd "${INVOKING_USER}" | cut -d: -f6)
+    if [[ "${INVOKING_USER}" != "root" && -d "${INVOKING_HOME}/.npm" ]] && find "${INVOKING_HOME}/.npm" -maxdepth 3 -user root -print -quit 2>/dev/null | grep -q .; then
+      echo "4. [WARN] Found root-owned files in ${INVOKING_HOME}/.npm."
+      echo "   Fix with: sudo chown -R ${INVOKING_USER}: \"${INVOKING_HOME}/.npm\""
+    else
+      echo "4. User npm cache ownership check passed."
+    fi
+    if [[ -d "${WPCLOUD_ROOT}/runtime" ]]; then
+      echo "5. [WARN] Legacy ${WPCLOUD_ROOT}/runtime still exists. Run 'sudo wpcloud rebuild' to switch systemd units to system Node."
+    else
+      echo "5. System Node.js direct execution check passed (no bundled runtime)."
+    fi
     ;;
   reset-password)
     NEW_PASS=$(openssl rand -base64 12)
@@ -34,11 +161,34 @@ case "${CMD}" in
     fi
     ;;
   update-node)
-    SOURCE_NODE="${2:-$(command -v node)}"
-    cp -f "${SOURCE_NODE}" "${WPCLOUD_ROOT}/runtime/bin/node"
-    chmod 755 "${WPCLOUD_ROOT}/runtime/bin/node"
-    echo "Updated ${WPCLOUD_ROOT}/runtime/bin/node to $(${WPCLOUD_ROOT}/runtime/bin/node -v)"
+    if [[ "${EUID}" -ne 0 ]]; then
+      echo "[ERROR] Please run with sudo: sudo wpcloud update-node [path-to-node]"
+      exit 1
+    fi
+    SOURCE_NODE="${2:-$(resolve_node_bin || true)}"
+    if [[ -z "${SOURCE_NODE}" || ! -x "${SOURCE_NODE}" ]]; then
+      echo "[ERROR] Could not locate a Node.js v22+ binary. Pass path explicitly: sudo wpcloud update-node /path/to/node"
+      exit 1
+    fi
+    update_systemd_node_path "${SOURCE_NODE}"
+    echo "Updated WPCloud systemd units to use system Node.js directly: ${SOURCE_NODE} ($("${SOURCE_NODE}" -v))"
     systemctl restart wpcloud-agent.service wpcloud-panel.service || true
+    ;;
+  update)
+    if [[ "${EUID}" -ne 0 ]]; then
+      echo "[ERROR] Please run with sudo: sudo wpcloud update"
+      exit 1
+    fi
+    if [[ ! -d "${WPCLOUD_ROOT}/app/.git" ]]; then
+      echo "[ERROR] ${WPCLOUD_ROOT}/app is not a git clone. Pull in your repo directory and run: sudo ./scripts/install.sh"
+      exit 1
+    fi
+    echo "=== Pulling latest WPCloud updates from git ==="
+    git -C "${WPCLOUD_ROOT}/app" pull --ff-only
+    run_rebuild
+    ;;
+  rebuild)
+    run_rebuild
     ;;
   restart)
     echo "Restarting WPCloud services..."
@@ -50,7 +200,7 @@ case "${CMD}" in
     journalctl -u wpcloud-agent.service -u wpcloud-panel.service -f
     ;;
   *)
-    echo "Usage: sudo wpcloud {status|doctor|restart|logs|reset-password|update-node [path-to-node]}"
+    echo "Usage: sudo wpcloud {status|doctor|restart|logs|reset-password|update|rebuild|update-node [path-to-node]}"
     exit 1
     ;;
 esac

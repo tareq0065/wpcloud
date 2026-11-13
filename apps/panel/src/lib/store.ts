@@ -603,14 +603,15 @@ export async function issueSiteLetsEncryptSsl(
     options: site.nginxOptions,
   });
 
-  await engine.runSafeCommand("wp.https_url", "wp", [
+  await engine.runWpCommandForSite("wp.https_url", site.linuxUser, [
     "search-replace",
     `http://${site.domain}`,
     `https://${site.domain}`,
     `--path=${site.rootPath}`,
     "--all-tables",
     "--precise",
-    "--allow-root",
+    "--skip-plugins",
+    "--skip-themes",
   ]);
 
   const now = new Date().toISOString();
@@ -696,7 +697,7 @@ export async function executeSiteWpCli(
 
   switch (operation) {
     case "update_core":
-      args = ["core", "update", `--path=${site.rootPath}`, "--allow-root"];
+      args = ["core", "update", `--path=${site.rootPath}`, "--skip-plugins", "--skip-themes"];
       summary = `Success: WordPress is at the latest version (6.7.2) in ${site.rootPath}.`;
       break;
     case "update_plugins":
@@ -705,12 +706,11 @@ export async function executeSiteWpCli(
         "update",
         "--all",
         `--path=${site.rootPath}`,
-        "--allow-root",
       ];
       summary = `Success: Checked and updated all installed plugins for ${site.domain}.`;
       break;
     case "flush_cache":
-      args = ["cache", "flush", `--path=${site.rootPath}`, "--allow-root"];
+      args = ["cache", "flush", `--path=${site.rootPath}`];
       summary = `Success: Object cache & permalink rewrite rules flushed for ${site.domain}.`;
       break;
     case "reset_admin_password": {
@@ -723,7 +723,8 @@ export async function executeSiteWpCli(
         site.wpAdminUser,
         `--user_pass=${pass}`,
         `--path=${site.rootPath}`,
-        "--allow-root",
+        "--skip-plugins",
+        "--skip-themes",
       ];
       site.wpAdminPassword = pass;
       await saveDb(db);
@@ -741,7 +742,8 @@ export async function executeSiteWpCli(
         "--all-tables",
         "--precise",
         `--path=${site.rootPath}`,
-        "--allow-root",
+        "--skip-plugins",
+        "--skip-themes",
       ];
       summary = `Success: Replaced '${params.fromUrl}' -> '${params.toUrl}' across all tables (serialized-safe).`;
       break;
@@ -751,7 +753,8 @@ export async function executeSiteWpCli(
         "maintenance-mode",
         "activate",
         `--path=${site.rootPath}`,
-        "--allow-root",
+        "--skip-plugins",
+        "--skip-themes",
       ];
       summary = `Success: Enabled WordPress maintenance mode for ${site.domain}.`;
       break;
@@ -760,13 +763,14 @@ export async function executeSiteWpCli(
         "maintenance-mode",
         "deactivate",
         `--path=${site.rootPath}`,
-        "--allow-root",
+        "--skip-plugins",
+        "--skip-themes",
       ];
       summary = `Success: Deactivated WordPress maintenance mode for ${site.domain}.`;
       break;
   }
 
-  const res = await engine.runSafeCommand(`wp.${operation}`, "wp", args);
+  const res = await engine.runWpCommandForSite(`wp.${operation}`, site.linuxUser, args);
   return { output: engine.isDryRun ? `${summary}\n${res.stdout}` : res.stdout || summary };
 }
 

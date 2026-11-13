@@ -34,6 +34,13 @@ export const NginxSiteOptionsSchema = z.object({
     .refine(
       (val) => !/(?:^|\s)(?:http|events|stream|mail)\s*\{/i.test(val),
       "Top-level http/events/stream blocks are not allowed inside a site server block"
+    )
+    .refine(
+      (val) =>
+        !/(?:^|[;\n\r\s])(?:root|alias|include|fastcgi_pass|proxy_pass|uwsgi_pass|scgi_pass|auth_request|ssl_certificate|ssl_certificate_key|perl_|lua_|content_by_lua|access_by_lua|rewrite_by_lua)\b/i.test(
+          val
+        ),
+      "Unsafe Nginx directives (root, alias, include, fastcgi_pass, proxy_pass, lua/perl) are forbidden"
     ),
 });
 export type NginxSiteOptions = z.infer<typeof NginxSiteOptionsSchema>;
@@ -97,8 +104,20 @@ export const ImportSiteInputSchema = z.object({
     .trim()
     .regex(/^[a-zA-Z0-9_]{1,24}$/)
     .default("wp_"),
-  filesArchiveName: z.string().min(1),
-  sqlDumpName: z.string().min(1),
+  filesArchiveName: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:zip|tar\.gz|tgz|tar)$/i,
+      "Invalid archive filename (must be .zip, .tar.gz, .tgz, or .tar without path separators)"
+    ),
+  sqlDumpName: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:sql|sql\.gz)$/i,
+      "Invalid SQL dump filename (must be .sql or .sql.gz without path separators)"
+    ),
   dbName: z.string().trim().regex(/^[a-zA-Z0-9_]{1,64}$/).optional(),
   dbUser: z.string().trim().regex(/^[a-zA-Z0-9_]{1,32}$/).optional(),
   dbPassword: z.string().trim().min(1).max(128).optional(),

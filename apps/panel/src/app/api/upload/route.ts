@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdminSession } from "@/lib/auth";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -8,6 +9,9 @@ import { getAgentEngine } from "@/lib/store";
 const execFileAsync = promisify(execFile);
 
 export async function POST(req: NextRequest) {
+  const authError = requireAdminSession(req);
+  if (authError) return authError;
+
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
@@ -25,6 +29,19 @@ export async function POST(req: NextRequest) {
     const safeName = path
       .basename(fileNameOverride || file.name)
       .replace(/[^a-zA-Z0-9._-]/g, "_");
+    if (
+      !/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:zip|tar\.gz|tgz|tar|sql|sql\.gz)$/i.test(
+        safeName
+      )
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Unsupported upload file extension. Allowed: .zip, .tar.gz, .tgz, .tar, .sql, .sql.gz.",
+        },
+        { status: 400 }
+      );
+    }
     const uploadDir = path.join(engine.wpcloudRoot, "data", "uploads");
     await fs.mkdir(uploadDir, { recursive: true });
 

@@ -19,7 +19,7 @@ interface LoginViewProps {
 
 export function LoginView({ totpEnabled, onSuccess }: LoginViewProps) {
   const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("wpcloud-admin-2026");
+  const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [requireTotp, setRequireTotp] = useState(totpEnabled);
@@ -205,7 +205,7 @@ export function LoginView({ totpEnabled, onSuccess }: LoginViewProps) {
           </div>
           <div className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/60 bg-white px-2.5 py-2">
             <Server className="h-3.5 w-3.5 text-indigo-600" />
-            <span>Node v24.12.0</span>
+            <span>System Node.js</span>
           </div>
           <div className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/60 bg-white px-2.5 py-2">
             <KeyRound className="h-3.5 w-3.5 text-violet-600" />

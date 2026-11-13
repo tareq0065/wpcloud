@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DomainSchema,
+  ImportSiteInputSchema,
   NginxSiteOptionsSchema,
   PhpPoolOptionsSchema,
   generateNginxMasterInclude,
@@ -154,4 +155,92 @@ test("generateWpPreviewMuPlugin filters home and siteurl and disables canonical 
   assert.match(mu, /remove_action\('template_redirect', 'redirect_canonical'\)/);
   assert.match(mu, /add_filter\('redirect_canonical', '__return_false'/);
   assert.match(mu, /previewtest\.com/);
+});
+
+test("generateNginxSiteConfig places writable-dir script deny rules before PHP FastCGI handler", () => {
+  const options = NginxSiteOptionsSchema.parse({});
+  const conf = generateNginxSiteConfig({
+    domain: "hardened.example",
+    wpcloudRoot: "/opt/wpcloud",
+    phpVersion: "8.3",
+    sslEnabled: false,
+    previewPort: 38082,
+    options,
+  });
+
+  const denyUploadsIndex = conf.indexOf(
+    "location ~* /(?:uploads|files|blogs\\.dir|upgrade|cache|backups?)/.*\\.(?:php\\d*|phtml|phar|pl|py|rb|cgi|sh|bash)$"
+  );
+  const denyScriptsIndex = conf.indexOf(
+    "location ~* \\.(?:phtml|phar|php[3-8]|pl|py|rb|cgi|sh|bash)$"
+  );
+  const phpHandlerIndex = conf.indexOf("location ~ \\.php$");
+  assert.ok(denyUploadsIndex !== -1);
+  assert.ok(denyScriptsIndex !== -1);
+  assert.ok(phpHandlerIndex !== -1);
+  assert.ok(denyUploadsIndex < phpHandlerIndex);
+  assert.ok(denyScriptsIndex < phpHandlerIndex);
+  assert.match(conf, /try_files \$uri =404;/);
+  assert.match(conf, /autoindex off;/);
+  assert.match(conf, /location ~\* \^\/\(\?:wp-config\(\?:-sample\)\?\\\.php\|wp-cli\\\.ya\?ml\|readme\\\.html\|license\\\.txt\)\$/);
+});
+
+test("generatePhpFpmPoolConfig disables dangerous exec functions and omits shared /tmp from open_basedir", () => {
+  const phpOptions = PhpPoolOptionsSchema.parse({});
+  const pool = generatePhpFpmPoolConfig({
+    domain: "hardened.example",
+    linuxUser: "wp_hardened",
+    wpcloudRoot: "/opt/wpcloud",
+    phpOptions,
+  });
+
+  assert.match(pool, /php_admin_value\[disable_functions\] = .*exec.*shell_exec.*proc_open.*popen/);
+  assert.match(pool, /php_admin_flag\[allow_url_include\] = off/);
+  assert.match(pool, /php_admin_flag\[expose_php\] = off/);
+  const openBasedirLine = pool
+    .split("\n")
+    .find((line) => line.startsWith("php_admin_value[open_basedir]"));
+  assert.ok(openBasedirLine);
+  assert.doesNotMatch(openBasedirLine, /:\/tmp(?::|$)/);
+});
+
+test("NginxSiteOptionsSchema and ImportSiteInputSchema reject dangerous directives and filenames", () => {
+  assert.throws(() =>
+    NginxSiteOptionsSchema.parse({ extraDirectives: "root /etc;" })
+  );
+  assert.throws(() =>
+    NginxSiteOptionsSchema.parse({ extraDirectives: "fastcgi_pass unix:/run/php/other.sock;" })
+  );
+  assert.throws(() =>
+    NginxSiteOptionsSchema.parse({ extraDirectives: "include /etc/passwd;" })
+  );
+  assert.ok(
+    NginxSiteOptionsSchema.parse({ extraDirectives: "add_header X-Frame-Options SAMEORIGIN;" })
+  );
+
+  assert.throws(() =>
+    ImportSiteInputSchema.parse({
+      domain: "import.example",
+      filesArchiveName: "../evil.zip",
+    })
+  );
+  assert.throws(() =>
+    ImportSiteInputSchema.parse({
+      domain: "import.example",
+      filesArchiveName: "shell.php",
+    })
+  );
+  assert.throws(() =>
+    ImportSiteInputSchema.parse({
+      domain: "import.example",
+      sqlDumpName: "dump.php",
+    })
+  );
+  assert.ok(
+    ImportSiteInputSchema.parse({
+      domain: "import.example",
+      filesArchiveName: "site-backup.tar.gz",
+      sqlDumpName: "db-backup.sql.gz",
+    })
+  );
 });

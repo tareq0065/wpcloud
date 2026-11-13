@@ -66,7 +66,7 @@ if [[ "${PURGE_SITES}" -eq 1 ]]; then
   echo "=================================================================="
 else
   echo "  • Preserving ${WPCLOUD_ROOT}/sites, ${WPCLOUD_ROOT}/nginx, and ${WPCLOUD_ROOT}/backups."
-  echo "  • Removing only WPCloud control panel app & runtime..."
+  echo "  • Removing only WPCloud control panel app & data..."
   rm -rf "${WPCLOUD_ROOT}/app" "${WPCLOUD_ROOT}/runtime" "${WPCLOUD_ROOT}/data"
   echo ""
   echo "=================================================================="

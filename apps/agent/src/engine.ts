@@ -130,13 +130,50 @@ export class AgentEngine {
   }
 
   /**
+   * Executes WP-CLI as the site's unprivileged Linux user (never as root / --allow-root)
+   * so compromised site PHP (wp-config.php, plugins, themes) cannot escalate privileges.
+   */
+  public async runWpCommandForSite(
+    action: string,
+    linuxUser: string,
+    wpArgs: string[],
+    options?: { allowFail?: boolean }
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(linuxUser)) {
+      throw new Error(`Invalid site Linux user: ${linuxUser}`);
+    }
+    const filteredArgs = wpArgs.filter((arg) => arg !== "--allow-root");
+    return this.runSafeCommand(
+      action,
+      "runuser",
+      ["-u", linuxUser, "--", "wp", ...filteredArgs],
+      options
+    );
+  }
+
+  private resolveUploadPath(fileName: string): string {
+    if (!fileName || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(fileName)) {
+      throw new Error(`Invalid upload filename: ${fileName}`);
+    }
+    const uploadsDir = path.resolve(this.wpcloudRoot, "data", "uploads");
+    const resolved = path.resolve(uploadsDir, fileName);
+    if (!resolved.startsWith(uploadsDir + path.sep)) {
+      throw new Error("Path traversal detected in upload filename");
+    }
+    return resolved;
+  }
+
+  private escapeSqlLiteral(value: string): string {
+    return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  }
+
+  /**
    * Ensures the /opt/wpcloud folder hierarchy exists.
    */
   public async ensureDirectoryLayout(): Promise<void> {
     const dirs = [
       this.wpcloudRoot,
       path.join(this.wpcloudRoot, "app"),
-      path.join(this.wpcloudRoot, "runtime", "bin"),
       path.join(this.wpcloudRoot, "sites"),
       path.join(this.wpcloudRoot, "nginx", "sites"),
       path.join(this.wpcloudRoot, "nginx", "snippets"),
@@ -419,20 +456,34 @@ export class AgentEngine {
       );
     }
 
-    // Provision MariaDB database & user
+    // Ensure site root is owned by the isolated Linux user before running WP-CLI unprivileged
+    await this.runSafeCommand(
+      "site.ownership_init",
+      "chown",
+      ["-R", `${site.linuxUser}:www-data`, siteRoot],
+      { allowFail: true }
+    );
+    await this.runSafeCommand(
+      "site.root_perms",
+      "chmod",
+      ["750", siteRoot],
+      { allowFail: true }
+    );
+
+    // Provision MariaDB database & user (strictly escaped SQL string literal)
+    const safeDbPassword = this.escapeSqlLiteral(site.dbPassword);
     await this.runSafeCommand("db.create", "mysql", [
       "-e",
-      `CREATE DATABASE IF NOT EXISTS \`${site.dbName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${site.dbUser}'@'localhost' IDENTIFIED BY '${site.dbPassword}'; GRANT ALL PRIVILEGES ON \`${site.dbName}\`.* TO '${site.dbUser}'@'localhost'; FLUSH PRIVILEGES;`,
+      `CREATE DATABASE IF NOT EXISTS \`${site.dbName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${site.dbUser}'@'localhost' IDENTIFIED BY '${safeDbPassword}'; GRANT ALL PRIVILEGES ON \`${site.dbName}\`.* TO '${site.dbUser}'@'localhost'; FLUSH PRIVILEGES;`,
     ]);
 
     if (site.mode === "fresh") {
-      await this.runSafeCommand("wp.download", "wp", [
+      await this.runWpCommandForSite("wp.download", site.linuxUser, [
         "core",
         "download",
         `--path=${publicDir}`,
-        `--allow-root`,
       ]);
-      await this.runSafeCommand("wp.config", "wp", [
+      await this.runWpCommandForSite("wp.config", site.linuxUser, [
         "config",
         "create",
         `--path=${publicDir}`,
@@ -440,9 +491,10 @@ export class AgentEngine {
         `--dbuser=${site.dbUser}`,
         `--dbpass=${site.dbPassword}`,
         `--dbprefix=${site.tablePrefix}`,
-        `--allow-root`,
+        "--skip-plugins",
+        "--skip-themes",
       ]);
-      await this.runSafeCommand("wp.install", "wp", [
+      await this.runWpCommandForSite("wp.install", site.linuxUser, [
         "core",
         "install",
         `--path=${publicDir}`,
@@ -451,8 +503,9 @@ export class AgentEngine {
         `--admin_user=${site.wpAdminUser}`,
         `--admin_password=${site.wpAdminPassword || "ChangeMe123!"}`,
         `--admin_email=${site.wpAdminEmail}`,
-        `--skip-email`,
-        `--allow-root`,
+        "--skip-email",
+        "--skip-plugins",
+        "--skip-themes",
       ]);
     }
 
@@ -512,6 +565,26 @@ export class AgentEngine {
 
     // Install instant IP preview helper mu-plugin
     await this.writeWpPreviewMuPlugin(site.domain, site.previewPort);
+
+    // Enforce strict site isolation permissions (site user + www-data read, wp-config.php 640)
+    await this.runSafeCommand(
+      "site.permissions",
+      "chown",
+      ["-R", `${site.linuxUser}:www-data`, siteRoot],
+      { allowFail: true }
+    );
+    await this.runSafeCommand(
+      "site.root_perms",
+      "chmod",
+      ["750", siteRoot],
+      { allowFail: true }
+    );
+    await this.runSafeCommand(
+      "site.wpconfig_perms",
+      "chmod",
+      ["640", wpConfigPath],
+      { allowFail: true }
+    );
   }
 
   /**
@@ -532,14 +605,18 @@ export class AgentEngine {
   }): Promise<void> {
     const siteRoot = path.join(this.wpcloudRoot, "sites", params.domain);
     const publicDir = path.join(siteRoot, "public");
-    const archivePath = path.join(this.wpcloudRoot, "data", "uploads", params.filesArchiveName);
-    const sqlPath = path.join(this.wpcloudRoot, "data", "uploads", params.sqlDumpName);
+    const archivePath = params.filesArchiveName
+      ? this.resolveUploadPath(params.filesArchiveName)
+      : "";
+    const sqlPath = params.sqlDumpName
+      ? this.resolveUploadPath(params.sqlDumpName)
+      : "";
 
     if (this.isDryRun) {
       return;
     }
 
-    // 1. Extract files archive into publicDir
+    // 1. Extract files archive into publicDir safely (no owner/setuid preservation, no symlinks)
     if (params.filesArchiveName) {
       const lowerArchive = params.filesArchiveName.toLowerCase();
       if (lowerArchive.endsWith(".zip")) {
@@ -552,6 +629,8 @@ export class AgentEngine {
         ]);
       } else if (lowerArchive.endsWith(".tar.gz") || lowerArchive.endsWith(".tgz")) {
         await this.runSafeCommand("archive.tar", "tar", [
+          "--no-same-owner",
+          "--no-same-permissions",
           "-xzf",
           archivePath,
           "-C",
@@ -559,12 +638,22 @@ export class AgentEngine {
         ]);
       } else if (lowerArchive.endsWith(".tar")) {
         await this.runSafeCommand("archive.tar", "tar", [
+          "--no-same-owner",
+          "--no-same-permissions",
           "-xf",
           archivePath,
           "-C",
           publicDir,
         ]);
       }
+
+      // Remove any symlinks from extracted archive so links cannot point outside site root
+      await this.runSafeCommand(
+        "archive.strip_symlinks",
+        "find",
+        [publicDir, "-type", "l", "-delete"],
+        { allowFail: true }
+      );
 
       // Check if extracted into a single nested root folder (e.g. wordpress/ or domain/ or public_html/)
       try {
@@ -629,38 +718,36 @@ export class AgentEngine {
         // ignore if large file, mysql source will proceed
       }
 
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn(
-            "mysql",
-            ["--default-character-set=utf8mb4", params.dbName],
-            { stdio: ["pipe", "pipe", "pipe"] }
-          );
-          const readStream = fsSync.createReadStream(resolvedSqlPath);
-          readStream.pipe(child.stdin);
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(
+          "mysql",
+          ["--default-character-set=utf8mb4", params.dbName],
+          { stdio: ["pipe", "pipe", "pipe"] }
+        );
+        const readStream = fsSync.createReadStream(resolvedSqlPath);
+        readStream.pipe(child.stdin);
 
-          let stderr = "";
-          child.stderr.on("data", (d) => {
-            stderr += d.toString();
-          });
-          child.on("close", (code) => {
-            if (code === 0) resolve();
-            else reject(new Error(`mysql db.import failed with exit code ${code}: ${stderr.trim()}`));
-          });
-          child.on("error", (err) => reject(err));
+        let stderr = "";
+        child.stderr.on("data", (d) => {
+          stderr += d.toString();
         });
-      } catch {
-        // Fallback to source command if spawn pipe hit any terminal condition
-        await this.runSafeCommand("db.import", "mysql", [
-          "--default-character-set=utf8mb4",
-          params.dbName,
-          "-e",
-          `source ${resolvedSqlPath}`,
-        ]);
-      }
+        child.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`mysql db.import failed with exit code ${code}: ${stderr.trim()}`));
+        });
+        child.on("error", (err) => reject(err));
+      });
     }
 
-    // 3. Configure wp-config.php
+    // Assign site user ownership BEFORE running WP-CLI so wp never executes site PHP as root
+    await this.runSafeCommand(
+      "site.ownership_pre_wp",
+      "chown",
+      ["-R", `${params.linuxUser}:www-data`, siteRoot],
+      { allowFail: true }
+    );
+
+    // 3. Configure wp-config.php (run unprivileged as linuxUser with --skip-plugins --skip-themes)
     const wpConfigPath = path.join(publicDir, "wp-config.php");
     let hasWpConfig = false;
     try {
@@ -671,28 +758,28 @@ export class AgentEngine {
     }
 
     if (hasWpConfig) {
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.config_dbname",
-        "wp",
-        ["config", "set", "DB_NAME", params.dbName, `--path=${publicDir}`, "--allow-root"],
+        params.linuxUser,
+        ["config", "set", "DB_NAME", params.dbName, `--path=${publicDir}`, "--skip-plugins", "--skip-themes"],
         { allowFail: true }
       );
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.config_dbuser",
-        "wp",
-        ["config", "set", "DB_USER", params.dbUser, `--path=${publicDir}`, "--allow-root"],
+        params.linuxUser,
+        ["config", "set", "DB_USER", params.dbUser, `--path=${publicDir}`, "--skip-plugins", "--skip-themes"],
         { allowFail: true }
       );
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.config_dbpass",
-        "wp",
-        ["config", "set", "DB_PASSWORD", params.dbPassword, `--path=${publicDir}`, "--allow-root"],
+        params.linuxUser,
+        ["config", "set", "DB_PASSWORD", params.dbPassword, `--path=${publicDir}`, "--skip-plugins", "--skip-themes"],
         { allowFail: true }
       );
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.config_dbhost",
-        "wp",
-        ["config", "set", "DB_HOST", "localhost", `--path=${publicDir}`, "--allow-root"],
+        params.linuxUser,
+        ["config", "set", "DB_HOST", "localhost", `--path=${publicDir}`, "--skip-plugins", "--skip-themes"],
         { allowFail: true }
       );
 
@@ -708,9 +795,9 @@ export class AgentEngine {
         // ignore
       }
     } else {
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.config_create",
-        "wp",
+        params.linuxUser,
         [
           "config",
           "create",
@@ -720,17 +807,18 @@ export class AgentEngine {
           `--dbpass=${params.dbPassword}`,
           `--dbhost=localhost`,
           `--dbprefix=${params.tablePrefix}`,
-          "--allow-root",
+          "--skip-plugins",
+          "--skip-themes",
         ],
         { allowFail: true }
       );
     }
 
-    // 4. Domain search-replace if requested
+    // 4. Domain search-replace if requested (run unprivileged as linuxUser)
     if (params.replaceDomain && params.oldDomain && params.oldDomain !== params.domain) {
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.search_replace_http",
-        "wp",
+        params.linuxUser,
         [
           "search-replace",
           `http://${params.oldDomain}`,
@@ -738,13 +826,14 @@ export class AgentEngine {
           "--all-tables",
           "--precise",
           `--path=${publicDir}`,
-          "--allow-root",
+          "--skip-plugins",
+          "--skip-themes",
         ],
         { allowFail: true }
       );
-      await this.runSafeCommand(
+      await this.runWpCommandForSite(
         "wp.search_replace_https",
-        "wp",
+        params.linuxUser,
         [
           "search-replace",
           `https://${params.oldDomain}`,
@@ -752,7 +841,8 @@ export class AgentEngine {
           "--all-tables",
           "--precise",
           `--path=${publicDir}`,
-          "--allow-root",
+          "--skip-plugins",
+          "--skip-themes",
         ],
         { allowFail: true }
       );
@@ -766,6 +856,12 @@ export class AgentEngine {
       { allowFail: true }
     );
     await this.runSafeCommand(
+      "site.root_perms",
+      "chmod",
+      ["750", siteRoot],
+      { allowFail: true }
+    );
+    await this.runSafeCommand(
       "site.chmod_dirs",
       "find",
       [publicDir, "-type", "d", "-exec", "chmod", "755", "{}", "+"],
@@ -775,6 +871,12 @@ export class AgentEngine {
       "site.chmod_files",
       "find",
       [publicDir, "-type", "f", "-exec", "chmod", "644", "{}", "+"],
+      { allowFail: true }
+    );
+    await this.runSafeCommand(
+      "site.wpconfig_perms",
+      "chmod",
+      ["640", wpConfigPath],
       { allowFail: true }
     );
 
