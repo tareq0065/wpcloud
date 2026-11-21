@@ -12,6 +12,8 @@ import {
   generateWpSmtpMuPlugin,
   buildSiteDnsInstructions,
   buildMailDomainDnsInstructions,
+  generateMailAcmeNginxConfig,
+  generateAppleMailMobileConfig,
 } from "../dist/index.js";
 
 test("DomainSchema accepts valid domains and rejects URLs/paths/shell metacharacters", () => {
@@ -243,4 +245,21 @@ test("NginxSiteOptionsSchema and ImportSiteInputSchema reject dangerous directiv
       sqlDumpName: "db-backup.sql.gz",
     })
   );
+});
+
+test("generateMailAcmeNginxConfig and generateAppleMailMobileConfig build valid configs", () => {
+  const acme = generateMailAcmeNginxConfig("mail.client.org", "/opt/wpcloud/mail/acme-webroot");
+  assert.match(acme, /server_name mail\.client\.org;/);
+  assert.match(acme, /location \^~ \/\.well-known\/acme-challenge\//);
+
+  const plist = generateAppleMailMobileConfig({
+    email: "info@client.org",
+    displayName: "Info & Support",
+    mailHostname: "mail.client.org",
+    domain: "client.org",
+  });
+  assert.match(plist, /<string>Info &amp; Support<\/string>/);
+  assert.match(plist, /<string>mail\.client\.org<\/string>/);
+  assert.match(plist, /<integer>993<\/integer>/);
+  assert.match(plist, /<integer>587<\/integer>/);
 });

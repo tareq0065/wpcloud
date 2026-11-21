@@ -928,7 +928,29 @@ export async function getLiveMailServerState(): Promise<MailServerState> {
       : "not_installed";
   db.mailServer.webmailUrl = "/mail";
 
+  if (!engine.isDryRun) {
+    for (const dom of db.mailServer.domains) {
+      dom.sslEnabled = await engine.hasMailHostnameCert(dom.domain);
+    }
+  }
+
   return db.mailServer;
+}
+
+export async function issueMailDomainSsl(
+  domainId: string
+): Promise<MailDomainRecord> {
+  const db = await getDb();
+  const engine = getAgentEngine();
+  const dom = db.mailServer.domains.find((d) => d.id === domainId);
+  if (!dom) throw new Error("Mail domain not found.");
+
+  await engine.issueMailHostnameSsl(dom.domain, db.settings.vpsIpv4);
+  dom.sslEnabled = true;
+  dom.sslIssuedAt = new Date().toISOString();
+  dom.status = "active";
+  await saveDb(db);
+  return dom;
 }
 
 export async function addMailDomain(domain: string): Promise<MailDomainRecord> {

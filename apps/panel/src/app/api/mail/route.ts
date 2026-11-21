@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { buildMailDomainDnsInstructions } from "@wpcloud/shared";
+import {
+  buildMailDomainDnsInstructions,
+  generateAppleMailMobileConfig,
+} from "@wpcloud/shared";
 import { requireAdminSession } from "@/lib/auth";
 import {
   addMailDomain,
@@ -7,6 +10,7 @@ import {
   getAgentEngine,
   getDb,
   getLiveMailServerState,
+  issueMailDomainSsl,
   runTitanImapSync,
   updateMailDeliveryMode,
 } from "@/lib/store";
@@ -15,6 +19,31 @@ export async function GET(req: NextRequest) {
   const authError = requireAdminSession(req);
   if (authError) return authError;
   const db = await getDb();
+
+  if (req.nextUrl.searchParams.get("action") === "mobileconfig") {
+    const mailboxId = req.nextUrl.searchParams.get("mailboxId") || "";
+    const mb = db.mailServer.mailboxes.find((m) => m.id === mailboxId);
+    if (!mb) {
+      return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
+    }
+    const dom = db.mailServer.domains.find((d) => d.id === mb.domainId);
+    const mailHostname = dom?.mailHostname || `mail.${mb.domain}`;
+    const xml = generateAppleMailMobileConfig({
+      email: mb.email,
+      displayName: mb.displayName,
+      mailHostname,
+      domain: mb.domain,
+    });
+    const safeFilename = `${mb.email.replace(/[^a-zA-Z0-9._@-]/g, "_")}.mobileconfig`;
+    return new NextResponse(xml, {
+      headers: {
+        "Content-Type": "application/x-apple-aspen-config",
+        "Content-Disposition": `attachment; filename="${safeFilename}"`,
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  }
+
   const mailServer = await getLiveMailServerState();
   const domainDnsMap: Record<string, ReturnType<typeof buildMailDomainDnsInstructions>> = {};
 
@@ -79,6 +108,12 @@ export async function POST(req: NextRequest) {
       await engine.setupMailServerStack();
       const mailServer = await getLiveMailServerState();
       return NextResponse.json({ ok: true, mailServer });
+    }
+
+    if (body.action === "issue_mail_ssl") {
+      const domain = await issueMailDomainSsl(body.domainId || "");
+      const mailServer = await getLiveMailServerState();
+      return NextResponse.json({ ok: true, domain, mailServer });
     }
 
     return NextResponse.json({ error: "Unknown mail action" }, { status: 400 });

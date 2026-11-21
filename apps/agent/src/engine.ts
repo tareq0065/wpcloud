@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import {
   buildSiteDnsInstructions,
+  generateMailAcmeNginxConfig,
   generateNginxMasterInclude,
   generateNginxSiteConfig,
   generatePhpFpmPoolConfig,
@@ -70,7 +71,7 @@ export class AgentEngine {
     action: string,
     binary: string,
     args: string[],
-    options?: { allowFail?: boolean }
+    options?: { allowFail?: boolean; env?: NodeJS.ProcessEnv; timeoutMs?: number }
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     if (binary === "pm2" || args.some((a) => a.includes("pm2"))) {
       throw new Error(
@@ -96,8 +97,9 @@ export class AgentEngine {
 
     try {
       const { stdout, stderr } = await execFileAsync(binary, args, {
-        timeout: 180_000,
+        timeout: options?.timeoutMs ?? 180_000,
         maxBuffer: 10 * 1024 * 1024,
+        env: options?.env,
       });
       const entry: CommandAuditEntry = {
         id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -1656,7 +1658,7 @@ export class AgentEngine {
     const dovecotCheck = await this.runSafeCommand(
       "mail.pkg_check",
       "dpkg",
-      ["-s", "dovecot-imapd", "postfix", "opendkim"],
+      ["-s", "dovecot-imapd", "dovecot-pop3d", "postfix", "opendkim"],
       { allowFail: true }
     );
     if (dovecotCheck.exitCode !== 0) {
@@ -1673,17 +1675,34 @@ export class AgentEngine {
         child.stdin.end();
       });
 
-      await this.runSafeCommand("mail.apt_update", "apt-get", ["update", "-y", "-q"]);
-      await this.runSafeCommand("mail.apt_install", "apt-get", [
-        "install",
-        "-y",
-        "-q",
-        "postfix",
-        "dovecot-imapd",
-        "dovecot-lmtpd",
-        "opendkim",
-        "opendkim-tools",
-      ]);
+      await this.runSafeCommand(
+        "mail.apt_update",
+        "apt-get",
+        ["update", "--allow-releaseinfo-change", "-y", "-q"],
+        {
+          allowFail: true,
+          env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" },
+        }
+      );
+      await this.runSafeCommand(
+        "mail.apt_install",
+        "apt-get",
+        [
+          "install",
+          "-y",
+          "-q",
+          "postfix",
+          "dovecot-imapd",
+          "dovecot-pop3d",
+          "dovecot-lmtpd",
+          "opendkim",
+          "opendkim-tools",
+        ],
+        {
+          timeoutMs: 300_000,
+          env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" },
+        }
+      );
     }
 
     // Ensure base files exist
@@ -1716,9 +1735,10 @@ export class AgentEngine {
     const sslCert = path.join(this.wpcloudRoot, "ssl", "panel", "cert.pem");
     const sslKey = path.join(this.wpcloudRoot, "ssl", "panel", "key.pem");
 
-    // Configure Dovecot
+    // Configure Dovecot (IMAP 993 + POP3 995 for Gmail Web + LMTP + SASL)
+    const sniDovecotBlocks = await this.buildDovecotSniBlocks();
     const dovecotConf = `# Managed by WPCloud — Isolated Virtual Mailboxes in ${mailDir}
-protocols = imap lmtp
+protocols = imap pop3 lmtp
 mail_location = maildir:${mailboxesDir}/%d/%n/Maildir
 mail_uid = ${vmailUid}
 mail_gid = ${vmailGid}
@@ -1753,6 +1773,7 @@ service lmtp {
     group = postfix
   }
 }
+${sniDovecotBlocks}
 `;
     await fs.writeFile("/etc/dovecot/conf.d/99-wpcloud.conf", dovecotConf, "utf8");
 
@@ -1791,6 +1812,23 @@ service lmtp {
       { allowFail: true }
     );
 
+    await this.runSafeCommand(
+      "mail.postfix_smtps",
+      "postconf",
+      [
+        "-M",
+        "smtps/inet=smtps inet n - y - - smtpd",
+        "-P",
+        "smtps/inet/syslog_name=postfix/smtps",
+        "smtps/inet/smtpd_tls_wrappermode=yes",
+        "smtps/inet/smtpd_sasl_auth_enable=yes",
+        "smtps/inet/smtpd_client_restrictions=permit_sasl_authenticated,reject",
+      ],
+      { allowFail: true }
+    );
+
+    await this.syncMailTlsSni(false);
+
     // Configure OpenDKIM
     const trustedHostsPath = path.join(dkimDir, "TrustedHosts");
     const keyTablePath = path.join(dkimDir, "KeyTable");
@@ -1827,8 +1865,8 @@ InternalHosts file:${trustedHostsPath}
     await fs.writeFile("/etc/opendkim.conf", opendkimConf, "utf8");
     await this.syncOpenDkimTables();
 
-    // Open standard mail ports in UFW if active
-    for (const port of ["25/tcp", "465/tcp", "587/tcp", "993/tcp"]) {
+    // Open standard mail ports in UFW if active (25 SMTP, 465 SMTPS, 587 Submission, 993 IMAPS, 995 POP3S)
+    for (const port of ["25/tcp", "465/tcp", "587/tcp", "993/tcp", "995/tcp"]) {
       await this.runSafeCommand("mail.ufw", "ufw", ["allow", port, "comment", "WPCloud Mail"], {
         allowFail: true,
       });
@@ -1846,6 +1884,172 @@ InternalHosts file:${trustedHostsPath}
     await this.runSafeCommand("mail.restart_postfix_reload", "systemctl", ["restart", "postfix"]);
 
     return this.getMailStackStatus();
+  }
+
+  private async getMailDomainsWithCerts(): Promise<
+    { domain: string; mailHostname: string; certPath: string; keyPath: string }[]
+  > {
+    const domainsPath = path.join(this.wpcloudRoot, "mail", "domains");
+    let doms: string[] = [];
+    try {
+      doms = (await fs.readFile(domainsPath, "utf8"))
+        .split(/\r?\n/)
+        .map((l) => l.trim().toLowerCase())
+        .filter(Boolean);
+    } catch {
+      doms = [];
+    }
+
+    const active: { domain: string; mailHostname: string; certPath: string; keyPath: string }[] = [];
+    for (const domain of doms) {
+      const mailHostname = `mail.${domain}`;
+      const certPath = `/etc/letsencrypt/live/${mailHostname}/fullchain.pem`;
+      const keyPath = `/etc/letsencrypt/live/${mailHostname}/privkey.pem`;
+      try {
+        await fs.access(certPath);
+        await fs.access(keyPath);
+        active.push({ domain, mailHostname, certPath, keyPath });
+      } catch {
+        // cert not issued yet
+      }
+    }
+    return active;
+  }
+
+  private async buildDovecotSniBlocks(): Promise<string> {
+    if (this.isDryRun) return "";
+    const certs = await this.getMailDomainsWithCerts();
+    return certs
+      .map(
+        (c) => `\nlocal_name ${c.mailHostname} {\n  ssl_cert = <${c.certPath}\n  ssl_key = <${c.keyPath}\n}`
+      )
+      .join("\n");
+  }
+
+  public async syncMailTlsSni(reloadServices = true): Promise<void> {
+    if (this.isDryRun) return;
+    const certs = await this.getMailDomainsWithCerts();
+    if (certs.length === 0) return;
+
+    // Update Dovecot 99-wpcloud.conf SNI blocks if installed
+    const dovecotFile = "/etc/dovecot/conf.d/99-wpcloud.conf";
+    try {
+      const current = await fs.readFile(dovecotFile, "utf8");
+      const base = current.split("\nlocal_name ")[0].trimEnd();
+      const sniBlocks = await this.buildDovecotSniBlocks();
+      await fs.writeFile(dovecotFile, `${base}\n${sniBlocks}\n`, "utf8");
+    } catch {
+      // dovecot config not written yet
+    }
+
+    // Update Postfix SNI map
+    const sniMapPath = path.join(this.wpcloudRoot, "mail", "sni_map");
+    const lines = certs.map((c) => `${c.mailHostname} ${c.keyPath} ${c.certPath}`);
+    await fs.writeFile(sniMapPath, lines.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+    await this.runSafeCommand("mail.postmap_sni", "postmap", ["-F", `hash:${sniMapPath}`], {
+      allowFail: true,
+    });
+    await this.runSafeCommand(
+      "mail.postfix_sni",
+      "postconf",
+      [
+        "-e",
+        `tls_server_sni_maps=hash:${sniMapPath}`,
+        `smtpd_tls_cert_file=${certs[0].certPath}`,
+        `smtpd_tls_key_file=${certs[0].keyPath}`,
+      ],
+      { allowFail: true }
+    );
+
+    if (reloadServices) {
+      await this.runSafeCommand("mail.reload_dovecot_sni", "systemctl", ["reload", "dovecot"], {
+        allowFail: true,
+      });
+      await this.runSafeCommand("mail.reload_postfix_sni", "systemctl", ["reload", "postfix"], {
+        allowFail: true,
+      });
+    }
+  }
+
+  public async hasMailHostnameCert(domain: string): Promise<boolean> {
+    if (this.isDryRun) return false;
+    try {
+      await fs.access(`/etc/letsencrypt/live/mail.${domain}/fullchain.pem`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Issues a trusted Let's Encrypt SSL certificate for mail.<domain> via Nginx HTTP-01 webroot
+   * so Gmail, Apple Mail, Outlook, and mobile clients trust IMAP (993), POP3 (995), and SMTP (465/587).
+   */
+  public async issueMailHostnameSsl(domain: string, vpsIpv4?: string): Promise<void> {
+    await this.ensureDirectoryLayout();
+    const mailHostname = `mail.${domain}`;
+    const acmeWebroot = path.join(this.wpcloudRoot, "mail", "acme-webroot");
+    await fs.mkdir(acmeWebroot, { recursive: true });
+
+    if (!this.isDryRun && vpsIpv4) {
+      const resolver = new Resolver();
+      resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+      let resolved: string[] = [];
+      try {
+        resolved = await resolver.resolve4(mailHostname);
+      } catch {
+        resolved = [];
+      }
+      if (!resolved.includes(vpsIpv4)) {
+        throw new Error(
+          `DNS A record for ${mailHostname} does not point to ${vpsIpv4} yet (found: ${
+            resolved.join(", ") || "none"
+          }). Add the 'mail' A record in DNS first.`
+        );
+      }
+    }
+
+    const nginxPath = path.join(this.wpcloudRoot, "nginx", "sites", `${mailHostname}.conf`);
+    let prevConf: string | null = null;
+    try {
+      prevConf = await fs.readFile(nginxPath, "utf8");
+    } catch {
+      prevConf = null;
+    }
+
+    await fs.writeFile(
+      nginxPath,
+      generateMailAcmeNginxConfig(mailHostname, "/opt/wpcloud/mail/acme-webroot"),
+      "utf8"
+    );
+
+    const testRes = await this.runSafeCommand("nginx.test_mail_acme", "nginx", ["-t"], {
+      allowFail: true,
+    });
+    if (testRes.exitCode !== 0) {
+      if (prevConf !== null) {
+        await fs.writeFile(nginxPath, prevConf, "utf8");
+      } else {
+        await fs.rm(nginxPath, { force: true });
+      }
+      throw new Error(`nginx -t failed for ${mailHostname}: ${testRes.stderr}`);
+    }
+
+    await this.runSafeCommand("nginx.reload_mail_acme", "systemctl", ["reload", "nginx"]);
+    await this.runSafeCommand("mail.certbot", "certbot", [
+      "certonly",
+      "--webroot",
+      "-w",
+      acmeWebroot,
+      "-d",
+      mailHostname,
+      "--non-interactive",
+      "--agree-tos",
+      "-m",
+      `postmaster@${domain}`,
+    ]);
+
+    await this.syncMailTlsSni(true);
   }
 }
 

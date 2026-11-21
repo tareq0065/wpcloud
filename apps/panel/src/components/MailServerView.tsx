@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type {
   DnsRecordInstruction,
+  MailboxRecord,
   MailServerState,
 } from "@wpcloud/shared";
 import { NativeModalDialog } from "./NativeModalDialog";
@@ -72,6 +73,11 @@ export function MailServerView({
   const [relayPort, setRelayPort] = useState(587);
   const [relayUser, setRelayUser] = useState("");
   const [relayPass, setRelayPass] = useState("");
+
+  // Client setup modal (Gmail / Outlook / Apple Mail)
+  const [clientSetupMailbox, setClientSetupMailbox] =
+    useState<MailboxRecord | null>(null);
+  const [clientSetupTab, setClientSetupTab] = useState<"imap" | "gmail_web">("imap");
 
   const loadMailData = useCallback(async () => {
     setLoading(true);
@@ -243,9 +249,28 @@ export function MailServerView({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to set up mail stack");
       setMailServer(data.mailServer);
-      notify("Postfix (SMTP 25/587), Dovecot (IMAP 993), and OpenDKIM are installed and active!");
+      notify("Postfix (SMTP 25/465/587), Dovecot (IMAP 993 / POP3 995), and OpenDKIM are active!");
     } catch (err: unknown) {
       notify(err instanceof Error ? err.message : "Mail server setup failed", "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleIssueMailSsl(domainId: string) {
+    setBusy(`ssl_${domainId}`);
+    try {
+      const res = await fetch("/api/mail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "issue_mail_ssl", domainId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to issue mail SSL");
+      setMailServer(data.mailServer);
+      notify(`Issued Let's Encrypt SSL for ${data.domain.mailHostname} & wired into Dovecot/Postfix!`);
+    } catch (err: unknown) {
+      notify(err instanceof Error ? err.message : "Mail SSL issuance failed", "error");
     } finally {
       setBusy(null);
     }
@@ -471,18 +496,31 @@ export function MailServerView({
                         )}
                       </td>
                       <td className="px-4 py-3.5 text-right">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setTargetEmail(mb.email);
-                            setSourceEmail(mb.email);
-                            setTitanSyncOpen(true);
-                          }}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                        >
-                          <ArrowRightLeft className="h-3 w-3 text-indigo-600" />{" "}
-                          Pull from Titan
-                        </button>
+                        <div className="inline-flex flex-wrap justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setClientSetupMailbox(mb);
+                              setClientSetupTab("imap");
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                          >
+                            <KeyRound className="h-3 w-3" />
+                            Gmail / App Setup
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTargetEmail(mb.email);
+                              setSourceEmail(mb.email);
+                              setTitanSyncOpen(true);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                          >
+                            <ArrowRightLeft className="h-3 w-3 text-indigo-600" />
+                            Pull from Titan
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -686,7 +724,27 @@ export function MailServerView({
               receive email for the domain instead of Titan Mail.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {activeDomain && (
+              activeDomain.sslEnabled ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  SSL Active ({activeDomain.mailHostname})
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={busy === `ssl_${activeDomain.id}`}
+                  onClick={() => void handleIssueMailSsl(activeDomain.id)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+                >
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  {busy === `ssl_${activeDomain.id}`
+                    ? "Issuing SSL..."
+                    : `Issue SSL (${activeDomain.mailHostname})`}
+                </button>
+              )
+            )}
             {mailServer.domains.map((d) => (
               <button
                 key={d.id}
@@ -1058,6 +1116,230 @@ export function MailServerView({
             </button>
           </div>
         </form>
+      </NativeModalDialog>
+
+      {/* Modal 4: Connect Gmail, Outlook, Apple Mail, Thunderbird (IMAP / POP3 / SMTP) */}
+      <NativeModalDialog
+        open={Boolean(clientSetupMailbox)}
+        onClose={() => setClientSetupMailbox(null)}
+        title={`Connect ${clientSetupMailbox?.email || "Mailbox"} to Gmail or Mail Apps`}
+        subtitle="Use these settings in Gmail, Apple Mail, Outlook, Thunderbird, iPhone, or Android."
+        maxWidthClass="max-w-2xl"
+      >
+        {clientSetupMailbox && (() => {
+          const dom = mailServer.domains.find(
+            (d) => d.id === clientSetupMailbox.domainId
+          );
+          const mailHost = dom?.mailHostname || `mail.${clientSetupMailbox.domain}`;
+          const hasSsl = Boolean(dom?.sslEnabled);
+
+          return (
+            <div className="space-y-4 text-xs">
+              {/* Server & SSL Readiness Checklist */}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2">
+                <div className="font-semibold text-slate-800">
+                  Server Readiness for Gmail &amp; External Mail Apps
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-slate-600">
+                    1. Mail Server (Dovecot IMAP/POP3 + Postfix SMTP):{" "}
+                    <strong className={mailServer.installed ? "text-emerald-700" : "text-amber-700"}>
+                      {mailServer.installed ? "Running" : "Not Installed"}
+                    </strong>
+                  </span>
+                  {!mailServer.installed && (
+                    <button
+                      type="button"
+                      disabled={busy === "setup_mail"}
+                      onClick={() => void handleSetupMailStack()}
+                      className="rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500"
+                    >
+                      {busy === "setup_mail" ? "Installing..." : "Setup IMAP/SMTP Server"}
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-slate-600">
+                    2. Trusted Let&apos;s Encrypt SSL on{" "}
+                    <code className="font-mono">{mailHost}</code>:{" "}
+                    <strong className={hasSsl ? "text-emerald-700" : "text-amber-700"}>
+                      {hasSsl ? "Active" : "Self-Signed (Required for Gmail)"}
+                    </strong>
+                  </span>
+                  {dom && !hasSsl && (
+                    <button
+                      type="button"
+                      disabled={busy === `ssl_${dom.id}`}
+                      onClick={() => void handleIssueMailSsl(dom.id)}
+                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                    >
+                      {busy === `ssl_${dom.id}` ? "Issuing SSL..." : "Issue Mail SSL"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Tabs: IMAP Apps vs Gmail Web */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setClientSetupTab("imap")}
+                  className={`rounded-xl border px-3 py-2 font-semibold transition ${
+                    clientSetupTab === "imap"
+                      ? "border-indigo-600 bg-indigo-50 text-indigo-700"
+                      : "border-slate-200 bg-white text-slate-700"
+                  }`}
+                >
+                  IMAP + SMTP (Gmail App, Apple Mail, Outlook)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setClientSetupTab("gmail_web")}
+                  className={`rounded-xl border px-3 py-2 font-semibold transition ${
+                    clientSetupTab === "gmail_web"
+                      ? "border-indigo-600 bg-indigo-50 text-indigo-700"
+                      : "border-slate-200 bg-white text-slate-700"
+                  }`}
+                >
+                  Gmail Web (mail.google.com)
+                </button>
+              </div>
+
+              {clientSetupTab === "imap" ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-xl border border-slate-200 p-3.5 space-y-2">
+                      <div className="font-bold text-slate-900">Incoming Mail (IMAP)</div>
+                      {[
+                        { label: "Server / Host", val: mailHost, k: "imap_host" },
+                        { label: "Port", val: "993", k: "imap_port" },
+                        { label: "Security", val: "SSL / TLS", k: "imap_sec" },
+                        { label: "Username", val: clientSetupMailbox.email, k: "imap_user" },
+                      ].map((row) => (
+                        <div key={row.k} className="flex items-center justify-between gap-2">
+                          <span className="text-slate-500">{row.label}:</span>
+                          <button
+                            type="button"
+                            onClick={() => copyText(row.k, row.val)}
+                            className="inline-flex items-center gap-1 font-mono font-semibold text-slate-900 hover:text-indigo-600"
+                          >
+                            {row.val}
+                            {copiedKey === row.k ? (
+                              <Check className="h-3 w-3 text-emerald-600" />
+                            ) : (
+                              <Copy className="h-3 w-3 text-slate-400" />
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 p-3.5 space-y-2">
+                      <div className="font-bold text-slate-900">Outgoing Mail (SMTP)</div>
+                      {[
+                        { label: "Server / Host", val: mailHost, k: "smtp_host" },
+                        { label: "Port (TLS / SSL)", val: "587 (or 465 SSL)", k: "smtp_port" },
+                        { label: "Auth Required", val: "Yes (Same password)", k: "smtp_auth" },
+                        { label: "Username", val: clientSetupMailbox.email, k: "smtp_user" },
+                      ].map((row) => (
+                        <div key={row.k} className="flex items-center justify-between gap-2">
+                          <span className="text-slate-500">{row.label}:</span>
+                          <button
+                            type="button"
+                            onClick={() => copyText(row.k, row.val)}
+                            className="inline-flex items-center gap-1 font-mono font-semibold text-slate-900 hover:text-indigo-600"
+                          >
+                            {row.val}
+                            {copiedKey === row.k ? (
+                              <Check className="h-3 w-3 text-emerald-600" />
+                            ) : (
+                              <Copy className="h-3 w-3 text-slate-400" />
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3">
+                    <div className="text-[11px] text-indigo-900">
+                      Using <strong>Mac / iPhone / iPad</strong>? Download a 1-click Apple Mail configuration profile:
+                    </div>
+                    <a
+                      href={`/api/mail?action=mobileconfig&mailboxId=${encodeURIComponent(
+                        clientSetupMailbox.id
+                      )}`}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                    >
+                      Download .mobileconfig
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3 rounded-xl border border-slate-200 p-4 text-xs leading-relaxed text-slate-700">
+                  <p className="text-[11px] text-slate-500">
+                    Note: Gmail&apos;s desktop web UI uses <strong>POP3 (995 SSL)</strong> for{" "}
+                    <em>Check mail from other accounts</em> and <strong>SMTP (465 SSL / 587 TLS)</strong> for{" "}
+                    <em>Send mail as</em>. (Gmail Android/iOS mobile apps support IMAP 993 directly.)
+                  </p>
+                  <div>
+                    <div className="font-bold text-slate-900">
+                      Step A — Receive emails inside Gmail Web:
+                    </div>
+                    <ol className="mt-1 list-decimal space-y-1 pl-5">
+                      <li>
+                        Open Gmail → <strong>Settings (gear) → See all settings → Accounts and Import</strong>.
+                      </li>
+                      <li>
+                        Under <strong>Check mail from other accounts</strong>, click{" "}
+                        <strong>Add a mail account</strong> and enter{" "}
+                        <code className="font-mono font-semibold">{clientSetupMailbox.email}</code>.
+                      </li>
+                      <li>
+                        Select <strong>Import emails from my other account (POP3)</strong>.
+                      </li>
+                      <li>
+                        POP Server: <code className="font-mono font-semibold">{mailHost}</code> • Port:{" "}
+                        <code className="font-mono font-semibold">995</code> • Check{" "}
+                        <strong>Always use a secure connection (SSL)</strong>.
+                      </li>
+                    </ol>
+                  </div>
+                  <div>
+                    <div className="font-bold text-slate-900">
+                      Step B — Send emails as {clientSetupMailbox.email}:
+                    </div>
+                    <ol className="mt-1 list-decimal space-y-1 pl-5">
+                      <li>
+                        Under <strong>Send mail as</strong>, click{" "}
+                        <strong>Add another email address</strong>.
+                      </li>
+                      <li>
+                        SMTP Server: <code className="font-mono font-semibold">{mailHost}</code> • Port:{" "}
+                        <code className="font-mono font-semibold">465</code> (SSL) or{" "}
+                        <code className="font-mono font-semibold">587</code> (TLS).
+                      </li>
+                      <li>
+                        Username: <code className="font-mono font-semibold">{clientSetupMailbox.email}</code> •
+                        Password: your WPCloud mailbox password.
+                      </li>
+                    </ol>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setClientSetupMailbox(null)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </NativeModalDialog>
     </div>
   );

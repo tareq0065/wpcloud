@@ -67,7 +67,7 @@ fi
 echo "  • Ports ${PANEL_PORT} (Panel) and ${ADMINER_PORT} (Adminer) are verified."
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  echo "  • UFW firewall is active. Allowing TCP ports ${PANEL_PORT} (Panel), ${ADMINER_PORT} (Adminer), 38080-38200 (Site Previews), and mail ports (25,465,587,993)..."
+  echo "  • UFW firewall is active. Allowing TCP ports ${PANEL_PORT} (Panel), ${ADMINER_PORT} (Adminer), 38080-38200 (Site Previews), and mail ports (25,465,587,993,995)..."
   ufw allow "${PANEL_PORT}/tcp" comment "WPCloud Panel" >/dev/null 2>&1 || true
   ufw allow "${ADMINER_PORT}/tcp" comment "WPCloud Adminer" >/dev/null 2>&1 || true
   ufw allow 38080:38200/tcp comment "WPCloud Site Previews" >/dev/null 2>&1 || true
@@ -75,6 +75,7 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
   ufw allow 465/tcp comment "WPCloud Mail SMTPS" >/dev/null 2>&1 || true
   ufw allow 587/tcp comment "WPCloud Mail Submission" >/dev/null 2>&1 || true
   ufw allow 993/tcp comment "WPCloud Mail IMAPS" >/dev/null 2>&1 || true
+  ufw allow 995/tcp comment "WPCloud Mail POP3S" >/dev/null 2>&1 || true
 fi
 
 # 2. Create /opt/wpcloud folder hierarchy
@@ -245,7 +246,7 @@ if [[ "${ALL_PACKAGES_PRESENT}" == "true" ]]; then
   echo "  • All required system packages (Nginx, MariaDB, PHP 8.1-8.3 FPM, Certbot, WP-CLI) already installed."
 else
   echo "  • Installing missing packages via apt-get..."
-  apt-get update -y -q
+  apt-get update --allow-releaseinfo-change -y -q
   apt-get install -y -q software-properties-common curl unzip openssl ca-certificates
 
   if ! command -v nginx >/dev/null 2>&1; then
@@ -259,7 +260,7 @@ else
 
   if ! apt-cache policy | grep -q "ondrej/php"; then
     add-apt-repository -y ppa:ondrej/php
-    apt-get update -y -q
+    apt-get update --allow-releaseinfo-change -y -q
   fi
 
   for VER in 8.1 8.2 8.3; do

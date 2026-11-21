@@ -231,6 +231,8 @@ export interface MailDomainRecord {
   mailHostname: string; // e.g., mail.example.com
   dkimSelector: string;
   dkimPublicKey: string;
+  sslEnabled?: boolean;
+  sslIssuedAt?: string;
   status: "active" | "pending_dns";
   createdAt: string;
 }

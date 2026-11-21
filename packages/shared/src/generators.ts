@@ -680,3 +680,126 @@ export function buildMailDomainDnsInstructions(
     },
   ];
 }
+
+/**
+ * Generates a minimal HTTP-01 ACME challenge Nginx vhost for mail.<domain>
+ * so Certbot can issue a trusted Let's Encrypt certificate for IMAP/POP3/SMTP.
+ */
+export function generateMailAcmeNginxConfig(
+  mailHostname: string,
+  acmeWebroot: string
+): string {
+  return [
+    `# WPCloud ACME Webroot Helper for ${mailHostname}`,
+    `server {`,
+    `    listen 80;`,
+    `    listen [::]:80;`,
+    `    server_name ${mailHostname};`,
+    ``,
+    `    location ^~ /.well-known/acme-challenge/ {`,
+    `        root ${acmeWebroot};`,
+    `        default_type "text/plain";`,
+    `        allow all;`,
+    `    }`,
+    ``,
+    `    location / {`,
+    `        return 404;`,
+    `    }`,
+    `}`,
+    ``,
+  ].join("\n");
+}
+
+function escapeXml(val: string): string {
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Generates an Apple Mail / iOS .mobileconfig profile with IMAP (993 SSL) & SMTP (587 STARTTLS).
+ */
+export function generateAppleMailMobileConfig(params: {
+  email: string;
+  displayName: string;
+  mailHostname: string;
+  domain: string;
+}): string {
+  const email = escapeXml(params.email);
+  const displayName = escapeXml(params.displayName || params.email);
+  const host = escapeXml(params.mailHostname);
+  const domain = escapeXml(params.domain);
+  const accountUuid = `wpcloud-mail-${params.domain}-${params.email}`
+    .replace(/[^a-zA-Z0-9.-]/g, "-")
+    .slice(0, 60);
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>EmailAccountDescription</key>
+      <string>${email}</string>
+      <key>EmailAccountName</key>
+      <string>${displayName}</string>
+      <key>EmailAccountType</key>
+      <string>EmailTypeIMAP</string>
+      <key>EmailAddress</key>
+      <string>${email}</string>
+      <key>IncomingMailServerAuthentication</key>
+      <string>EmailAuthPassword</string>
+      <key>IncomingMailServerHostName</key>
+      <string>${host}</string>
+      <key>IncomingMailServerPortNumber</key>
+      <integer>993</integer>
+      <key>IncomingMailServerUseSSL</key>
+      <true/>
+      <key>IncomingMailServerUsername</key>
+      <string>${email}</string>
+      <key>OutgoingMailServerAuthentication</key>
+      <string>EmailAuthPassword</string>
+      <key>OutgoingMailServerHostName</key>
+      <string>${host}</string>
+      <key>OutgoingMailServerPortNumber</key>
+      <integer>587</integer>
+      <key>OutgoingMailServerUseSSL</key>
+      <true/>
+      <key>OutgoingMailServerUsername</key>
+      <string>${email}</string>
+      <key>OutgoingPasswordSameAsIncomingPassword</key>
+      <true/>
+      <key>PayloadDescription</key>
+      <string>Configures IMAP &amp; SMTP for ${email}</string>
+      <key>PayloadDisplayName</key>
+      <string>${email}</string>
+      <key>PayloadIdentifier</key>
+      <string>com.wpcloud.mail.${accountUuid}</string>
+      <key>PayloadType</key>
+      <string>com.apple.mail.managed</string>
+      <key>PayloadUUID</key>
+      <string>11111111-2222-4333-8444-555555555555</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key>
+  <string>WPCloud Email (${email})</string>
+  <key>PayloadIdentifier</key>
+  <string>com.wpcloud.profile.${domain}</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>
+`;
+}
