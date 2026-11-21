@@ -185,6 +185,8 @@ test("generateNginxSiteConfig places writable-dir script deny rules before PHP F
   assert.ok(denyUploadsIndex < phpHandlerIndex);
   assert.ok(denyScriptsIndex < phpHandlerIndex);
   assert.match(conf, /try_files \$uri =404;/);
+  assert.doesNotMatch(conf, /snippets\/fastcgi-php\.conf/);
+  assert.match(conf, /include fastcgi_params;/);
   assert.match(conf, /autoindex off;/);
   assert.match(conf, /location ~\* \^\/\(\?:wp-config\(\?:-sample\)\?\\\.php\|wp-cli\\\.ya\?ml\|readme\\\.html\|license\\\.txt\)\$/);
 });
