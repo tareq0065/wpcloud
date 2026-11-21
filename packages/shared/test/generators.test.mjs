@@ -51,6 +51,8 @@ test("generateNginxSiteConfig builds automated vhost with www->apex redirect, SS
   });
 
   assert.match(conf, /root \/opt\/wpcloud\/sites\/client\.org\/public;/);
+  assert.match(conf, /listen 443 ssl http2;/);
+  assert.doesNotMatch(conf, /^\s*http2 on;/m);
   assert.match(conf, /fastcgi_pass unix:\/run\/php\/wpcloud-client\.org\.sock;/);
   assert.match(conf, /client_max_body_size 256M;/);
   assert.match(conf, /location = \/xmlrpc\.php/);

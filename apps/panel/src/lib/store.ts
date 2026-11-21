@@ -588,6 +588,7 @@ export async function issueSiteLetsEncryptSsl(
     ...domainsArgs,
     "--non-interactive",
     "--agree-tos",
+    "--keep-until-expiring",
     "-m",
     site.wpAdminEmail,
   ]);

@@ -99,9 +99,8 @@ export function generateNginxSiteConfig(params: {
       `    listen [::]:80;`,
       ...(sslEnabled
         ? [
-            `    listen 443 ssl;`,
-            `    listen [::]:443 ssl;`,
-            `    http2 on;`,
+            `    listen 443 ssl http2;`,
+            `    listen [::]:443 ssl http2;`,
             `    ssl_certificate ${sslCert};`,
             `    ssl_certificate_key ${sslKey};`,
           ]
@@ -150,9 +149,8 @@ export function generateNginxSiteConfig(params: {
   }
   if (sslEnabled) {
     lines.push(
-      `    listen 443 ssl;`,
-      `    listen [::]:443 ssl;`,
-      `    http2 on;`,
+      `    listen 443 ssl http2;`,
+      `    listen [::]:443 ssl http2;`,
       `    ssl_certificate ${sslCert};`,
       `    ssl_certificate_key ${sslKey};`,
       `    ssl_protocols TLSv1.2 TLSv1.3;`,

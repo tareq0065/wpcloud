@@ -2045,6 +2045,7 @@ InternalHosts file:${trustedHostsPath}
       mailHostname,
       "--non-interactive",
       "--agree-tos",
+      "--keep-until-expiring",
       "-m",
       `postmaster@${domain}`,
     ]);
