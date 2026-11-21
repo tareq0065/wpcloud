@@ -1,6 +1,6 @@
 # WPCloud — Self-Hosted WordPress, Automated Nginx & Mail Control Panel
 
-A private, production-grade Next.js 16 + Tailwind CSS control panel engineered for Ubuntu 24.04 LTS VPS environments. WPCloud provides automated WordPress provisioning, lossless site migrations (`.zip`/`.tar.gz` + `.sql`), isolated PHP-FPM pools (8.1, 8.2, 8.3), automated Nginx virtual hosts with zero-downtime rollback, Let's Encrypt SSL, instant IP preview URLs before DNS propagation, and an integrated multi-domain mail server (Stalwart IMAP/SMTP + SnappyMail + Titan Mail sync).
+A private, production-grade Next.js 16 + Tailwind CSS control panel engineered for Ubuntu 24.04 LTS VPS environments. WPCloud provides automated WordPress provisioning, lossless site migrations (`.zip`/`.tar.gz` + `.sql`), isolated PHP-FPM pools (8.1, 8.2, 8.3), automated Nginx virtual hosts with zero-downtime rollback, Let's Encrypt SSL, instant IP preview URLs before DNS propagation, and an integrated multi-domain mail server (Postfix SMTP + Dovecot IMAP + OpenDKIM + WPCloud Webmail + Titan Mail IMAP backup).
 
 ---
 
@@ -115,13 +115,13 @@ WPCloud makes migrating existing WordPress sites effortless:
 
 ## Complete Email & Mailbox Setup Guide
 
-WPCloud includes a full multi-domain mail server powered by Stalwart Mail Server with SnappyMail webmail, plus an automated IMAP synchronization tool to backup/migrate mail from Titan Mail (Hostinger).
+WPCloud includes an isolated Maildir storage & virtual auth system (`/opt/wpcloud/mail/`), a built-in Webmail client (`https://YOUR_VPS_IP:7070/mail`), a native TLS IMAP backup client for Titan Mail (Hostinger), and one-click provisioning for **Postfix (SMTP 25/587) + Dovecot (IMAP 993) + OpenDKIM**.
 
 ### 1. Attaching a Domain & Configuring DNS Records
 In the WPCloud Panel under the **Mail Server** tab:
 1. Click **Attach Mail Domain** and enter your domain (e.g. `yourdomain.com`).
-2. WPCloud generates a dedicated 2048-bit DKIM key and provides copyable DNS records.
-3. Add these records in your domain's DNS management (Cloudflare, Namecheap, GoDaddy, Hostinger):
+2. WPCloud generates a real 2048-bit RSA DKIM keypair in `/opt/wpcloud/mail/dkim/<domain>/` and provides copyable DNS records.
+3. Add these records in your domain's DNS management (Cloudflare, Namecheap, GoDaddy, Hostinger) **only when ready to switch live mail delivery to your VPS**:
 
 | Type | Name / Host | Target / Value | Priority / TTL | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
@@ -161,10 +161,12 @@ Users can connect their inboxes to **Gmail, Outlook, Apple Mail, Thunderbird, iP
 
 ### 5. Migrating Existing Emails from Titan Mail (Hostinger)
 If your client previously had email on Titan Mail:
-1. Click **Backup / Sync from Titan Mail** in the WPCloud Mail Server view.
-2. Enter the source Titan credentials (`imap.titan.email`, `info@yourdomain.com`, password).
+1. Click **Attach Mail Domain** and **Create Mailbox (me@domain)** in the WPCloud Mail Server tab.
+2. Click **Backup / Sync from Titan Mail** and enter the source Titan credentials (`imap.titan.email`, `info@yourdomain.com`, password).
 3. Select your target WPCloud mailbox.
-4. WPCloud runs an automated background `imapsync` job that copies all folders, read/unread states, and attachments without duplicate downloads.
+4. WPCloud connects directly over IMAP TLS (`993`), downloads all folders, messages, read/unread flags, and attachments into `/opt/wpcloud/mail/mailboxes/<domain>/<user>/Maildir/` (with UID & Message-ID deduplication so re-runs never create duplicates).
+5. Open **`https://YOUR_VPS_IP:7070/mail`** and sign in with your mailbox email & password to browse, search, and read all backed-up emails immediately.
+6. To connect external apps (Gmail, Outlook, Apple Mail) over IMAP/SMTP, click **Setup IMAP/SMTP Server** in the panel (or run `sudo wpcloud setup-mail`) to install and configure Dovecot + Postfix + OpenDKIM.
 
 ---
 

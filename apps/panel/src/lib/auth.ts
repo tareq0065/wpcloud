@@ -16,6 +16,7 @@ function getSessionSecret(): string {
 }
 
 export const SESSION_COOKIE_NAME = "wpcloud_session";
+export const WEBMAIL_COOKIE_NAME = "wpcloud_webmail_session";
 
 export function requireAdminSession(req: NextRequest): NextResponse | null {
   const token = req.cookies.get(SESSION_COOKIE_NAME)?.value;
@@ -77,7 +78,66 @@ export function verifySessionToken(
   try {
     const parsed = JSON.parse(
       Buffer.from(payload, "base64url").toString("utf8")
-    ) as { sub: string; exp: number };
+    ) as { sub: string; exp: number; scope?: string };
+    if (parsed.scope && parsed.scope !== "admin") return null;
+    if (Date.now() > parsed.exp) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function createWebmailToken(params: {
+  email: string;
+  domain: string;
+  localPart: string;
+}): string {
+  const exp = Date.now() + 1000 * 60 * 60 * 24 * 7;
+  const payload = Buffer.from(
+    JSON.stringify({
+      scope: "webmail",
+      email: params.email,
+      domain: params.domain,
+      localPart: params.localPart,
+      exp,
+    })
+  ).toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", getSessionSecret())
+    .update(payload)
+    .digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+export function verifyWebmailToken(
+  token?: string | null
+): { email: string; domain: string; localPart: string; exp: number } | null {
+  if (!token || !token.includes(".")) return null;
+  const [payload, sig] = token.split(".");
+  if (!payload || !sig) return null;
+  const expectedSig = crypto
+    .createHmac("sha256", getSessionSecret())
+    .update(payload)
+    .digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (
+    sigBuf.length !== expBuf.length ||
+    !crypto.timingSafeEqual(sigBuf, expBuf)
+  ) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    ) as {
+      scope?: string;
+      email: string;
+      domain: string;
+      localPart: string;
+      exp: number;
+    };
+    if (parsed.scope !== "webmail") return null;
     if (Date.now() > parsed.exp) return null;
     return parsed;
   } catch {

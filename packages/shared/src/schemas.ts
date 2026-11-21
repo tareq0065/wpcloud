@@ -252,6 +252,11 @@ export interface MailboxRecord {
 export interface MailServerState {
   installed: boolean;
   serviceStatus: "running" | "stopped" | "not_installed";
+  services?: {
+    dovecot: boolean;
+    postfix: boolean;
+    opendkim: boolean;
+  };
   webmailUrl: string;
   contaboPort25Open: boolean;
   ptrRecordHost: string;
@@ -272,6 +277,11 @@ export interface MailServerState {
     sourceEmail: string;
     targetEmail: string;
     messagesCopied: number;
+    totalMessages?: number;
+    skippedExisting?: number;
+    foldersSynced?: number;
+    currentFolder?: string;
+    error?: string;
     status: "running" | "completed" | "failed";
     startedAt: string;
     completedAt?: string;

@@ -4,7 +4,32 @@ import path from "node:path";
 import { AgentEngine } from "./engine.js";
 
 export { AgentEngine } from "./engine.js";
-export type { CommandAuditEntry } from "./engine.js";
+export type { CommandAuditEntry, MailStackStatus } from "./engine.js";
+export {
+  decodeImapUtf7,
+  folderToMaildirSubdir,
+  syncImapToMaildir,
+  testImapLogin,
+} from "./imap-backup.js";
+export type {
+  ImapFolderInfo,
+  ImapSyncProgress,
+  ImapSyncResult,
+} from "./imap-backup.js";
+export {
+  appendSentToMaildir,
+  listMaildirFolders,
+  listMaildirMessages,
+  readMaildirMessage,
+  sanitizeEmailHtml,
+  sendSmtpMessage,
+} from "./maildir-reader.js";
+export type {
+  MaildirAttachment,
+  MaildirFolderSummary,
+  MaildirMessageDetail,
+  MaildirMessageSummary,
+} from "./maildir-reader.js";
 
 const SOCKET_PATH =
   process.env.WPCLOUD_AGENT_SOCKET ||

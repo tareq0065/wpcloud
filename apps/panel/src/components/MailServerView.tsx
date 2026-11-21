@@ -1,11 +1,13 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   ArrowRightLeft,
   Check,
   CheckCircle2,
   Copy,
+  ExternalLink,
   Globe,
   Inbox,
   KeyRound,
@@ -15,6 +17,7 @@ import {
   Send,
   Server,
   ShieldCheck,
+  Wrench,
 } from "lucide-react";
 import type {
   DnsRecordInstruction,
@@ -118,6 +121,25 @@ export function MailServerView({
     void loadMailData();
   }, [loadMailData]);
 
+  // Poll live sync progress while a Titan IMAP backup job is running
+  const hasRunningSync = Boolean(
+    mailServer?.syncJobs?.some((j) => j.status === "running")
+  );
+  useEffect(() => {
+    if (!hasRunningSync) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch("/api/mail");
+        if (!res.ok) return;
+        const data = await res.json();
+        setMailServer(data.mailServer);
+      } catch {
+        // ignore transient poll error
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [hasRunningSync]);
+
   function copyText(key: string, val: string) {
     void navigator.clipboard.writeText(val);
     setCopiedKey(key);
@@ -199,10 +221,31 @@ export function MailServerView({
       setSourcePassword("");
       await loadMailData();
       notify(
-        `Backed up ${data.syncJob.messagesCopied.toLocaleString()} emails from ${sourceHost} (${sourceEmail}) into ${targetEmail}!`
+        data.syncJob.status === "running"
+          ? `Connected to ${sourceHost}! Backing up ${sourceEmail} into ${targetEmail} in the background...`
+          : `Backed up ${data.syncJob.messagesCopied.toLocaleString()} emails from ${sourceHost} (${sourceEmail}) into ${targetEmail}!`
       );
     } catch (err: unknown) {
       notify(err instanceof Error ? err.message : "Sync failed", "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleSetupMailStack() {
+    setBusy("setup_mail");
+    try {
+      const res = await fetch("/api/mail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "setup_mail_stack" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to set up mail stack");
+      setMailServer(data.mailServer);
+      notify("Postfix (SMTP 25/587), Dovecot (IMAP 993), and OpenDKIM are installed and active!");
+    } catch (err: unknown) {
+      notify(err instanceof Error ? err.message : "Mail server setup failed", "error");
     } finally {
       setBusy(null);
     }
@@ -265,25 +308,56 @@ export function MailServerView({
       {/* Top Banner */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs">
         <div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-xl font-bold tracking-tight text-slate-900">
               Multi-Domain Mail Server &amp; Titan Mail Backup
             </h1>
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-600/20">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              Stalwart Mail + SnappyMail Active
-            </span>
+            {mailServer.installed ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-600/20">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Postfix SMTP + Dovecot IMAP Active
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 ring-1 ring-amber-600/20">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                Maildir Backup &amp; Webmail Ready (External IMAP/SMTP Not Installed)
+              </span>
+            )}
           </div>
           <p className="mt-1 text-xs text-slate-500">
             Create client mailboxes like{" "}
             <code className="font-mono text-indigo-600">me@example.com</code>,
-            attach multiple domains, or back up existing emails from{" "}
-            <strong>Titan Mail (Hostinger)</strong> over IMAP (
-            <code className="font-mono">imap.titan.email</code>).
+            back up existing emails from <strong>Titan Mail (Hostinger)</strong> over IMAP (
+            <code className="font-mono">imap.titan.email</code>), and read them in{" "}
+            <Link href="/mail" className="font-semibold text-indigo-600 hover:underline">
+              WPCloud Webmail
+            </Link>
+            .
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          <Link
+            href="/mail"
+            target="_blank"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open Webmail (/mail)
+          </Link>
+          {!mailServer.installed && (
+            <button
+              type="button"
+              disabled={busy === "setup_mail"}
+              onClick={() => void handleSetupMailStack()}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+            >
+              <Wrench className="h-3.5 w-3.5" />
+              {busy === "setup_mail"
+                ? "Installing Dovecot + Postfix..."
+                : "Setup IMAP/SMTP Server"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setAddDomainOpen(true)}
@@ -517,6 +591,18 @@ export function MailServerView({
                   className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs"
                 />
               </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-600">
+                  Relay SMTP Password / Secret
+                </label>
+                <input
+                  type="password"
+                  value={relayPass}
+                  onChange={(e) => setRelayPass(e.target.value)}
+                  placeholder="SMTP key or password"
+                  className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs"
+                />
+              </div>
             </div>
           )}
 
@@ -530,6 +616,63 @@ export function MailServerView({
           </button>
         </form>
       </div>
+
+      {/* Titan Mail IMAP Backup Jobs Log */}
+      {mailServer.syncJobs.length > 0 && (
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs">
+          <h2 className="text-base font-semibold text-slate-900">
+            Titan Mail / IMAP Backup Jobs ({mailServer.syncJobs.length})
+          </h2>
+          <div className="mt-3 space-y-2">
+            {mailServer.syncJobs.slice(0, 8).map((job) => (
+              <div
+                key={job.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50 px-4 py-2.5 text-xs"
+              >
+                <div className="flex items-center gap-2.5">
+                  {job.status === "running" ? (
+                    <RefreshCw className="h-4 w-4 animate-spin text-indigo-600" />
+                  ) : job.status === "completed" ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  ) : (
+                    <Server className="h-4 w-4 text-rose-600" />
+                  )}
+                  <div>
+                    <span className="font-mono font-semibold text-slate-900">
+                      {job.sourceEmail}
+                    </span>{" "}
+                    <span className="text-slate-500">({job.sourceHost})</span> →{" "}
+                    <span className="font-mono font-semibold text-indigo-700">
+                      {job.targetEmail}
+                    </span>
+                    {job.error && (
+                      <div className="mt-0.5 text-[11px] font-medium text-rose-700">
+                        {job.error}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="font-mono text-[11px] text-slate-600">
+                  {job.status === "running" ? (
+                    <span>
+                      Syncing {job.currentFolder || "INBOX"} • {job.messagesCopied.toLocaleString()}
+                      {job.totalMessages ? ` / ${job.totalMessages.toLocaleString()}` : ""} copied
+                    </span>
+                  ) : job.status === "completed" ? (
+                    <span>
+                      {job.messagesCopied.toLocaleString()} copied
+                      {job.skippedExisting ? ` • ${job.skippedExisting.toLocaleString()} skipped` : ""}
+                      {job.foldersSynced ? ` • ${job.foldersSynced} folders` : ""}
+                    </span>
+                  ) : (
+                    <span className="font-semibold text-rose-700">Failed</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Per-Domain Mail DNS Records (MX, SPF, DKIM 2048-bit, DMARC, Contabo PTR) */}
       <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-2xs">
@@ -813,8 +956,8 @@ export function MailServerView({
       <NativeModalDialog
         open={titanSyncOpen}
         onClose={() => setTitanSyncOpen(false)}
-        title="Backup & Copy Emails from Titan Mail (imapsync)"
-        subtitle="Connects to imap.titan.email (port 993 SSL) and copies all folders and messages into your WPCloud mailbox."
+        title="Backup & Copy Emails from Titan Mail (IMAP SSL)"
+        subtitle="Connects to imap.titan.email (port 993 SSL) and copies all folders, attachments, and read states into your WPCloud Maildir mailbox."
       >
         <form onSubmit={handleTitanSync} className="space-y-4">
           <div>
@@ -910,7 +1053,7 @@ export function MailServerView({
               className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500"
             >
               {busy === "titan_sync"
-                ? "Syncing Folders via imapsync..."
+                ? "Connecting to Titan IMAP..."
                 : "Start Titan Mail Backup"}
             </button>
           </div>

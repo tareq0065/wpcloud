@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { AgentEngine } from "@wpcloud/agent/engine";
+import { syncImapToMaildir, testImapLogin } from "@wpcloud/agent/imap-backup";
 import {
   generateNginxSiteConfig,
   generatePhpFpmPoolConfig,
@@ -77,9 +78,14 @@ function createInitialDatabase(): PanelDatabase {
     sites: [],
     jobs: [],
     mailServer: {
-      installed: true,
-      serviceStatus: "running",
-      webmailUrl: vpsIpv4 ? `https://${vpsIpv4}:7070/mail` : "",
+      installed: false,
+      serviceStatus: "not_installed",
+      services: {
+        dovecot: false,
+        postfix: false,
+        opendkim: false,
+      },
+      webmailUrl: "/mail",
       contaboPort25Open: true,
       ptrRecordHost: "",
       ptrMatchesHostname: false,
@@ -900,23 +906,51 @@ export async function toggleOrDeleteSite(
 }
 
 /**
- * Mail Server (Phase 7): Adds a domain, creates a mailbox (e.g. me@example.com),
- * updates Direct vs Relay mode, or runs a Titan Mail imapsync migration job.
+ * Mail Server (Phase 7): Adds a domain with real 2048-bit RSA DKIM keys,
+ * creates a Maildir mailbox (e.g. me@example.com), updates Direct vs Relay mode,
+ * or runs a real TLS IMAP backup job from Titan Mail into Maildir.
  */
+export async function getLiveMailServerState(): Promise<MailServerState> {
+  const db = await getDb();
+  const engine = getAgentEngine();
+  const status = await engine.getMailStackStatus();
+
+  db.mailServer.installed = status.installed;
+  db.mailServer.services = {
+    dovecot: status.dovecot,
+    postfix: status.postfix,
+    opendkim: status.opendkim,
+  };
+  db.mailServer.serviceStatus = status.installed
+    ? "running"
+    : status.dovecot || status.postfix
+      ? "stopped"
+      : "not_installed";
+  db.mailServer.webmailUrl = "/mail";
+
+  return db.mailServer;
+}
+
 export async function addMailDomain(domain: string): Promise<MailDomainRecord> {
   const db = await getDb();
+  const engine = getAgentEngine();
   const clean = domain.trim().toLowerCase();
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(clean)) {
+    throw new Error("Enter a valid domain name (e.g. example.com).");
+  }
   if (db.mailServer.domains.some((d) => d.domain === clean)) {
     throw new Error(`Domain ${clean} is already registered in the mail server.`);
   }
+
+  const dkimSelector = "wpcloud2026";
+  const { publicKeyBase64 } = await engine.generateMailDomainDkim(clean, dkimSelector);
+
   const record: MailDomainRecord = {
     id: `md_${Date.now().toString(36)}`,
     domain: clean,
     mailHostname: `mail.${clean}`,
-    dkimSelector: "wpcloud2026",
-    dkimPublicKey:
-      "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA" +
-      crypto.randomBytes(24).toString("base64").replace(/[^a-zA-Z0-9]/g, ""),
+    dkimSelector,
+    dkimPublicKey: publicKeyBase64,
     status: "pending_dns",
     createdAt: new Date().toISOString(),
   };
@@ -942,19 +976,23 @@ export async function createMailbox(params: {
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, "");
   if (!localClean) throw new Error("Enter a valid mailbox username (e.g. me).");
+  if (!params.password || params.password.length < 6) {
+    throw new Error("Enter a mailbox password of at least 6 characters.");
+  }
 
   const email = `${localClean}@${dom.domain}`;
   if (db.mailServer.mailboxes.some((m) => m.email === email)) {
     throw new Error(`Mailbox ${email} already exists.`);
   }
 
-  await engine.runSafeCommand("mail.create_account", "stalwart-cli", [
-    "account",
-    "create",
+  const quotaMb = Math.max(50, Number(params.quotaMb || 5120));
+  await engine.provisionMailboxAccount({
+    domain: dom.domain,
+    localPart: localClean,
     email,
-    `--name=${params.displayName || localClean}`,
-    `--quota=${params.quotaMb}M`,
-  ]);
+    password: params.password,
+    quotaMb,
+  });
 
   const mb: MailboxRecord = {
     id: `mb_${Date.now().toString(36)}`,
@@ -962,8 +1000,8 @@ export async function createMailbox(params: {
     domain: dom.domain,
     localPart: localClean,
     email,
-    displayName: params.displayName || email,
-    quotaMb: params.quotaMb,
+    displayName: params.displayName?.trim() || email,
+    quotaMb,
     usedMb: 1,
     status: "active",
     createdAt: new Date().toISOString(),
@@ -973,8 +1011,30 @@ export async function createMailbox(params: {
   return mb;
 }
 
+export async function updateMailDeliveryMode(params: {
+  deliveryMode: "direct" | "relay";
+  relayConfig?: Partial<MailServerState["relayConfig"]>;
+}): Promise<MailServerState> {
+  const db = await getDb();
+  const engine = getAgentEngine();
+  db.mailServer.deliveryMode = params.deliveryMode === "relay" ? "relay" : "direct";
+  if (params.relayConfig) {
+    db.mailServer.relayConfig = {
+      ...db.mailServer.relayConfig,
+      ...params.relayConfig,
+    };
+  }
+  await engine.configurePostfixRelay(
+    db.mailServer.deliveryMode,
+    db.mailServer.relayConfig
+  );
+  await saveDb(db);
+  return getLiveMailServerState();
+}
+
 export async function runTitanImapSync(params: {
   sourceHost: string;
+  sourcePort?: number;
   sourceEmail: string;
   sourcePassword: string;
   targetEmail: string;
@@ -982,46 +1042,129 @@ export async function runTitanImapSync(params: {
   const db = await getDb();
   const engine = getAgentEngine();
 
-  await engine.runSafeCommand("mail.imapsync", "imapsync", [
-    "--host1",
-    params.sourceHost,
-    "--port1",
-    "993",
-    "--ssl1",
-    "--user1",
-    params.sourceEmail,
-    "--host2",
-    "127.0.0.1",
-    "--port2",
-    "993",
-    "--ssl2",
-    "--user2",
-    params.targetEmail,
-    "--automap",
-  ]);
+  const sourceHost = (params.sourceHost || "imap.titan.email").trim();
+  const sourceEmail = (params.sourceEmail || "").trim();
+  const sourcePassword = params.sourcePassword || "";
+  const targetEmail = (params.targetEmail || "").trim().toLowerCase();
 
-  const now = new Date().toISOString();
-  const copiedCount = 640 + Math.floor(Math.random() * 900);
-  const syncJob = {
-    id: `sync_${Date.now().toString(36)}`,
-    sourceHost: params.sourceHost,
-    sourceEmail: params.sourceEmail,
-    targetEmail: params.targetEmail,
-    messagesCopied: copiedCount,
-    status: "completed" as const,
-    startedAt: now,
-    completedAt: now,
-  };
+  if (!sourceEmail || !sourcePassword) {
+    throw new Error("Source Titan Mail email and password are required.");
+  }
 
   const targetMb = db.mailServer.mailboxes.find(
-    (m) => m.email === params.targetEmail
+    (m) => m.email.toLowerCase() === targetEmail
   );
-  if (targetMb) {
-    targetMb.lastSyncedFrom = `${params.sourceHost} (${copiedCount.toLocaleString()} messages backed up)`;
-    targetMb.usedMb = Math.min(targetMb.quotaMb, targetMb.usedMb + 310);
+  if (!targetMb) {
+    throw new Error("Select a valid target WPCloud mailbox first.");
   }
+
+  const mailboxRoot = engine.getMailboxRoot(targetMb.domain, targetMb.localPart);
+  const now = new Date().toISOString();
+
+  // Dry-run shortcut only when not targeting localhost test IMAP server
+  if (engine.isDryRun && sourceHost !== "127.0.0.1" && sourceHost !== "localhost") {
+    const syncJob: MailServerState["syncJobs"][number] = {
+      id: `sync_${Date.now().toString(36)}`,
+      sourceHost,
+      sourceEmail,
+      targetEmail: targetMb.email,
+      messagesCopied: 0,
+      totalMessages: 0,
+      skippedExisting: 0,
+      foldersSynced: 1,
+      currentFolder: "INBOX",
+      status: "completed",
+      startedAt: now,
+      completedAt: now,
+    };
+    targetMb.lastSyncedFrom = `${sourceHost} (Dry-Run Mode — connect on Linux VPS for live Titan sync)`;
+    db.mailServer.syncJobs.unshift(syncJob);
+    await saveDb(db);
+    return syncJob;
+  }
+
+  // Validate Titan IMAP credentials synchronously first so invalid password errors surface immediately
+  const sourcePort = params.sourcePort ?? 993;
+  const { folders } = await testImapLogin({
+    host: sourceHost,
+    port: sourcePort,
+    useTls: sourcePort === 993,
+    rejectUnauthorized: sourceHost !== "127.0.0.1" && sourceHost !== "localhost",
+    email: sourceEmail,
+    password: sourcePassword,
+  });
+
+  const syncJob: MailServerState["syncJobs"][number] = {
+    id: `sync_${Date.now().toString(36)}`,
+    sourceHost,
+    sourceEmail,
+    targetEmail: targetMb.email,
+    messagesCopied: 0,
+    totalMessages: 0,
+    skippedExisting: 0,
+    foldersSynced: 0,
+    currentFolder: folders[0]?.displayName || "INBOX",
+    status: "running",
+    startedAt: now,
+  };
 
   db.mailServer.syncJobs.unshift(syncJob);
   await saveDb(db);
+
+  // Run full IMAP download in background so large mailboxes never hit HTTP request timeouts
+  void (async () => {
+    try {
+      let lastSavedAt = 0;
+      const result = await syncImapToMaildir({
+        sourceHost,
+        sourcePort,
+        useTls: sourcePort === 993,
+        rejectUnauthorized: sourceHost !== "127.0.0.1" && sourceHost !== "localhost",
+        sourceEmail,
+        sourcePassword,
+        mailboxRoot,
+        onProgress: async (progress) => {
+          syncJob.currentFolder = progress.currentFolder;
+          syncJob.foldersSynced = progress.foldersSynced;
+          syncJob.totalMessages = progress.totalMessages;
+          syncJob.messagesCopied = progress.messagesCopied;
+          syncJob.skippedExisting = progress.skippedExisting;
+          if (Date.now() - lastSavedAt > 1500) {
+            lastSavedAt = Date.now();
+            await saveDb(db);
+          }
+        },
+      });
+
+      if (!engine.isDryRun) {
+        await engine.runSafeCommand(
+          "mail.chown_vmail_sync",
+          "chown",
+          ["-R", "vmail:vmail", mailboxRoot],
+          { allowFail: true }
+        );
+      }
+
+      syncJob.status = "completed";
+      syncJob.messagesCopied = result.messagesCopied;
+      syncJob.totalMessages = result.totalMessages;
+      syncJob.skippedExisting = result.skippedExisting;
+      syncJob.foldersSynced = result.foldersSynced;
+      syncJob.completedAt = new Date().toISOString();
+
+      targetMb.usedMb = await engine.getMailboxDiskUsageMb(
+        targetMb.domain,
+        targetMb.localPart
+      );
+      targetMb.lastSyncedFrom = `${sourceHost} (${result.totalMessages.toLocaleString()} total, ${result.messagesCopied.toLocaleString()} new across ${result.foldersSynced} folders)`;
+      await saveDb(db);
+    } catch (err: unknown) {
+      syncJob.status = "failed";
+      syncJob.error = err instanceof Error ? err.message : "IMAP sync failed";
+      syncJob.completedAt = new Date().toISOString();
+      await saveDb(db);
+    }
+  })();
+
   return syncJob;
 }

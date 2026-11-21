@@ -650,7 +650,7 @@ export default function WpCloudAppPage() {
 ├─ sites/        (${sites.length} WordPress sites)
 ├─ nginx/sites/  (Automated .conf files)
 ├─ php/8.1..8.3/ (Per-site FPM pools)
-├─ mail/         (Stalwart + imapsync)
+├─ mail/         (Maildirs + DKIM + Dovecot/Postfix)
 └─ backups/      (Pre-delete snapshots)`}
                     </pre>
                   </div>

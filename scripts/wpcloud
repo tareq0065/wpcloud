@@ -199,8 +199,21 @@ case "${CMD}" in
     echo "Tailing WPCloud services logs (Ctrl+C to exit)..."
     journalctl -u wpcloud-agent.service -u wpcloud-panel.service -f
     ;;
+  setup-mail)
+    if [[ "${EUID}" -ne 0 ]]; then
+      echo "[ERROR] Please run with sudo: sudo wpcloud setup-mail"
+      exit 1
+    fi
+    SOURCE_NODE="$(resolve_node_bin || true)"
+    if [[ -z "${SOURCE_NODE}" || ! -x "${SOURCE_NODE}" ]]; then
+      echo "[ERROR] Could not locate a Node.js v22+ binary."
+      exit 1
+    fi
+    echo "=== Installing & Configuring WPCloud Mail Stack (Postfix + Dovecot + OpenDKIM) ==="
+    WPCLOUD_ROOT="${WPCLOUD_ROOT}" "${SOURCE_NODE}" -e "import('${WPCLOUD_ROOT}/app/apps/agent/dist/engine.js').then(async ({ AgentEngine }) => { const e = new AgentEngine(); const s = await e.setupMailServerStack(); console.log('Mail stack status:', s); })"
+    ;;
   *)
-    echo "Usage: sudo wpcloud {status|doctor|restart|logs|reset-password|update|rebuild|update-node [path-to-node]}"
+    echo "Usage: sudo wpcloud {status|doctor|restart|logs|reset-password|update|rebuild|update-node [path-to-node]|setup-mail}"
     exit 1
     ;;
 esac

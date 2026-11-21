@@ -4,15 +4,18 @@ import { requireAdminSession } from "@/lib/auth";
 import {
   addMailDomain,
   createMailbox,
+  getAgentEngine,
   getDb,
+  getLiveMailServerState,
   runTitanImapSync,
-  saveDb,
+  updateMailDeliveryMode,
 } from "@/lib/store";
 
 export async function GET(req: NextRequest) {
   const authError = requireAdminSession(req);
   if (authError) return authError;
   const db = await getDb();
+  const mailServer = await getLiveMailServerState();
   const domainDnsMap: Record<string, ReturnType<typeof buildMailDomainDnsInstructions>> = {};
 
   for (const dom of db.mailServer.domains) {
@@ -23,7 +26,7 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    mailServer: db.mailServer,
+    mailServer,
     vpsIpv4: db.settings.vpsIpv4,
     domainDnsMap,
   });
@@ -53,27 +56,29 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "update_delivery_mode") {
-      const db = await getDb();
-      db.mailServer.deliveryMode =
-        body.deliveryMode === "relay" ? "relay" : "direct";
-      if (body.relayConfig) {
-        db.mailServer.relayConfig = {
-          ...db.mailServer.relayConfig,
-          ...body.relayConfig,
-        };
-      }
-      await saveDb(db);
-      return NextResponse.json({ ok: true, mailServer: db.mailServer });
+      const mailServer = await updateMailDeliveryMode({
+        deliveryMode: body.deliveryMode === "relay" ? "relay" : "direct",
+        relayConfig: body.relayConfig,
+      });
+      return NextResponse.json({ ok: true, mailServer });
     }
 
     if (body.action === "titan_imapsync") {
       const syncJob = await runTitanImapSync({
         sourceHost: body.sourceHost || "imap.titan.email",
+        sourcePort: body.sourcePort ? Number(body.sourcePort) : 993,
         sourceEmail: body.sourceEmail,
         sourcePassword: body.sourcePassword,
         targetEmail: body.targetEmail,
       });
       return NextResponse.json({ ok: true, syncJob });
+    }
+
+    if (body.action === "setup_mail_stack") {
+      const engine = getAgentEngine();
+      await engine.setupMailServerStack();
+      const mailServer = await getLiveMailServerState();
+      return NextResponse.json({ ok: true, mailServer });
     }
 
     return NextResponse.json({ error: "Unknown mail action" }, { status: 400 });
@@ -84,4 +89,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-

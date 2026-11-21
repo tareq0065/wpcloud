@@ -13,7 +13,7 @@
     "start": "npm --workspace=@wpcloud/panel run start",
     "agent": "npm --workspace=@wpcloud/agent run start",
     "typecheck": "npm --workspace=@wpcloud/shared run typecheck && npm --workspace=@wpcloud/agent run typecheck && npm --workspace=@wpcloud/panel run typecheck",
-    "test": "node --test packages/shared/test/*.test.mjs"
+    "test": "node --test packages/shared/test/*.test.mjs apps/agent/test/*.test.mjs"
   },
   "engines": {
     "node": ">=22.0.0"

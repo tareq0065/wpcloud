@@ -13,6 +13,14 @@
     "./engine": {
       "types": "./dist/engine.d.ts",
       "default": "./dist/engine.js"
+    },
+    "./imap-backup": {
+      "types": "./dist/imap-backup.d.ts",
+      "default": "./dist/imap-backup.js"
+    },
+    "./maildir-reader": {
+      "types": "./dist/maildir-reader.d.ts",
+      "default": "./dist/maildir-reader.js"
     }
   },
   "scripts": {

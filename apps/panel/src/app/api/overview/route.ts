@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAgentEngine, getDb } from "@/lib/store";
+import { getAgentEngine, getDb, getLiveMailServerState } from "@/lib/store";
 import { generateTotpCode, requireAdminSession } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
@@ -10,6 +10,7 @@ export async function GET(req: NextRequest) {
   const metrics = await engine.getServerMetrics();
   const externalNginx = await engine.inspectExternalNginxDomains();
   const auditLog = engine.getAuditLog();
+  const mailServer = await getLiveMailServerState();
 
   return NextResponse.json({
     settings: {
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
     },
     sites: db.sites,
     jobs: db.jobs,
-    mailServer: db.mailServer,
+    mailServer,
     metrics,
     externalNginx,
     auditLog,

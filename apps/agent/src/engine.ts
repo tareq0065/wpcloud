@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import {
   buildSiteDnsInstructions,
@@ -19,6 +20,13 @@ import {
   type SiteRecord,
   type WpSmtpConfig,
 } from "@wpcloud/shared";
+
+export interface MailStackStatus {
+  installed: boolean;
+  dovecot: boolean;
+  postfix: boolean;
+  opendkim: boolean;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -1192,6 +1200,652 @@ export class AgentEngine {
         },
       ],
     };
+  }
+
+  // ============================================================================
+  // Mail Server (Maildir + Dovecot + Postfix + OpenDKIM) — Isolated in /opt/wpcloud/mail
+  // ============================================================================
+
+  public getMailboxRoot(domain: string, localPart: string): string {
+    return path.join(this.wpcloudRoot, "mail", "mailboxes", domain, localPart);
+  }
+
+  public getMaildirRoot(domain: string, localPart: string): string {
+    return path.join(this.getMailboxRoot(domain, localPart), "Maildir");
+  }
+
+  private async ensureMaildirFoldersExist(maildirRoot: string): Promise<void> {
+    const folders = ["", ".Sent", ".Drafts", ".Trash", ".Archive", ".Junk"];
+    for (const folder of folders) {
+      const base = folder ? path.join(maildirRoot, folder) : maildirRoot;
+      await fs.mkdir(path.join(base, "cur"), { recursive: true });
+      await fs.mkdir(path.join(base, "new"), { recursive: true });
+      await fs.mkdir(path.join(base, "tmp"), { recursive: true });
+      if (folder) {
+        try {
+          await fs.writeFile(path.join(base, "maildirfolder"), "", { flag: "wx" });
+        } catch {
+          // already exists
+        }
+      }
+    }
+    const subPath = path.join(maildirRoot, "subscriptions");
+    try {
+      await fs.access(subPath);
+    } catch {
+      await fs.writeFile(subPath, "Sent\nDrafts\nTrash\nArchive\nJunk\n", "utf8");
+    }
+  }
+
+  private async hashDovecotPassword(password: string): Promise<string> {
+    if (!this.isDryRun) {
+      try {
+        const hash = await new Promise<string>((resolve, reject) => {
+          const child = spawn("openssl", ["passwd", "-6", "-stdin"], {
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          let out = "";
+          let err = "";
+          child.stdout.on("data", (d) => (out += d.toString("utf8")));
+          child.stderr.on("data", (d) => (err += d.toString("utf8")));
+          child.on("close", (code) => {
+            if (code === 0 && out.trim().startsWith("$6$")) {
+              resolve(`{SHA512-CRYPT}${out.trim()}`);
+            } else {
+              reject(new Error(err || `openssl passwd failed (${code})`));
+            }
+          });
+          child.on("error", reject);
+          child.stdin.write(password + "\n");
+          child.stdin.end();
+        });
+        return hash;
+      } catch {
+        // Fallback to pure Node SSHA256 below (natively supported by Dovecot)
+      }
+    }
+
+    const salt = crypto.randomBytes(4);
+    const digest = crypto
+      .createHash("sha256")
+      .update(Buffer.concat([Buffer.from(password, "utf8"), salt]))
+      .digest();
+    return `{SSHA256}${Buffer.concat([digest, salt]).toString("base64")}`;
+  }
+
+  private hashWebmailPassword(password: string): string {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const derived = crypto.scryptSync(password, salt, 64).toString("hex");
+    return `${salt}:${derived}`;
+  }
+
+  public async verifyMailboxCredentials(
+    email: string,
+    password: string
+  ): Promise<{ valid: boolean; domain?: string; localPart?: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+    const authPath = path.join(this.wpcloudRoot, "mail", "webmail-users.json");
+    try {
+      const raw = await fs.readFile(authPath, "utf8");
+      const users = JSON.parse(raw) as Record<
+        string,
+        { hash: string; domain: string; localPart: string }
+      >;
+      const rec = users[cleanEmail];
+      if (!rec || !rec.hash) return { valid: false };
+      const [salt, key] = rec.hash.split(":");
+      if (!salt || !key) return { valid: false };
+      const derived = crypto.scryptSync(password, salt, 64);
+      const keyBuf = Buffer.from(key, "hex");
+      if (derived.length !== keyBuf.length) return { valid: false };
+      if (!crypto.timingSafeEqual(derived, keyBuf)) return { valid: false };
+      return { valid: true, domain: rec.domain, localPart: rec.localPart };
+    } catch {
+      return { valid: false };
+    }
+  }
+
+  /**
+   * Generates a real 2048-bit RSA DKIM keypair inside /opt/wpcloud/mail/dkim/<domain>/
+   * and registers the domain in /opt/wpcloud/mail/domains.
+   */
+  public async generateMailDomainDkim(
+    domain: string,
+    selector = "wpcloud2026"
+  ): Promise<{ publicKeyBase64: string; privateKeyPath: string }> {
+    await this.ensureDirectoryLayout();
+    const mailDir = path.join(this.wpcloudRoot, "mail");
+    const dkimDir = path.join(mailDir, "dkim", domain);
+    await fs.mkdir(dkimDir, { recursive: true });
+
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const privateKeyPath = path.join(dkimDir, `${selector}.private`);
+    await fs.writeFile(privateKeyPath, privateKey, { encoding: "utf8", mode: 0o600 });
+
+    const publicKeyBase64 = publicKey
+      .replace(/-----BEGIN PUBLIC KEY-----/g, "")
+      .replace(/-----END PUBLIC KEY-----/g, "")
+      .replace(/\s+/g, "");
+
+    // Register domain in /opt/wpcloud/mail/domains
+    const domainsPath = path.join(mailDir, "domains");
+    let existingDomains: string[] = [];
+    try {
+      existingDomains = (await fs.readFile(domainsPath, "utf8"))
+        .split(/\r?\n/)
+        .map((l) => l.trim().toLowerCase())
+        .filter(Boolean);
+    } catch {
+      existingDomains = [];
+    }
+    if (!existingDomains.includes(domain.toLowerCase())) {
+      existingDomains.push(domain.toLowerCase());
+      await fs.writeFile(domainsPath, existingDomains.join("\n") + "\n", "utf8");
+    }
+
+    await this.syncOpenDkimTables();
+    return { publicKeyBase64, privateKeyPath };
+  }
+
+  private async syncOpenDkimTables(): Promise<void> {
+    if (this.isDryRun) return;
+    const mailDir = path.join(this.wpcloudRoot, "mail");
+    const dkimBase = path.join(mailDir, "dkim");
+    const keyTableLines: string[] = [];
+    const signingTableLines: string[] = [];
+
+    try {
+      const domains = await fs.readdir(dkimBase, { withFileTypes: true });
+      for (const entry of domains) {
+        if (!entry.isDirectory()) continue;
+        const dom = entry.name;
+        const priv = path.join(dkimBase, dom, "wpcloud2026.private");
+        try {
+          await fs.access(priv);
+          const keyName = `wpcloud2026._domainkey.${dom}`;
+          keyTableLines.push(`${keyName} ${dom}:wpcloud2026:${priv}`);
+          signingTableLines.push(`*@${dom} ${keyName}`);
+        } catch {
+          // ignore
+        }
+      }
+      await fs.writeFile(path.join(dkimBase, "KeyTable"), keyTableLines.join("\n") + "\n", "utf8");
+      await fs.writeFile(
+        path.join(dkimBase, "SigningTable"),
+        signingTableLines.join("\n") + "\n",
+        "utf8"
+      );
+      await this.runSafeCommand("opendkim.chown", "chown", ["-R", "opendkim:opendkim", dkimBase], {
+        allowFail: true,
+      });
+      await this.runSafeCommand("opendkim.reload", "systemctl", ["reload", "opendkim"], {
+        allowFail: true,
+      });
+    } catch {
+      // opendkim may not be installed yet
+    }
+  }
+
+  /**
+   * Provisions a local Maildir mailbox + Dovecot/Postfix virtual auth files under /opt/wpcloud/mail/
+   * without requiring external proprietary binaries like stalwart-cli.
+   */
+  public async provisionMailboxAccount(params: {
+    domain: string;
+    localPart: string;
+    email: string;
+    password: string;
+    quotaMb: number;
+  }): Promise<{ mailboxRoot: string; maildirRoot: string }> {
+    await this.ensureDirectoryLayout();
+    const mailDir = path.join(this.wpcloudRoot, "mail");
+    const mailboxRoot = this.getMailboxRoot(params.domain, params.localPart);
+    const maildirRoot = this.getMaildirRoot(params.domain, params.localPart);
+
+    await this.ensureMaildirFoldersExist(maildirRoot);
+
+    // 1. Update Dovecot passwd-file (/opt/wpcloud/mail/users.passwd)
+    const dovecotHash = await this.hashDovecotPassword(params.password);
+    const passwdPath = path.join(mailDir, "users.passwd");
+    let passwdLines: string[] = [];
+    try {
+      passwdLines = (await fs.readFile(passwdPath, "utf8"))
+        .split(/\r?\n/)
+        .filter((l) => l.trim().length > 0 && !l.startsWith(`${params.email}:`));
+    } catch {
+      passwdLines = [];
+    }
+    passwdLines.push(
+      `${params.email}:${dovecotHash}:::::${mailboxRoot}::userdb_quota_rule=*:storage=${params.quotaMb}M`
+    );
+    await fs.writeFile(passwdPath, passwdLines.join("\n") + "\n", {
+      encoding: "utf8",
+      mode: 0o640,
+    });
+
+    // 2. Update Webmail scrypt auth store (/opt/wpcloud/mail/webmail-users.json)
+    const authPath = path.join(mailDir, "webmail-users.json");
+    let authMap: Record<string, { hash: string; domain: string; localPart: string }> = {};
+    try {
+      authMap = JSON.parse(await fs.readFile(authPath, "utf8")) as typeof authMap;
+    } catch {
+      authMap = {};
+    }
+    authMap[params.email.toLowerCase()] = {
+      hash: this.hashWebmailPassword(params.password),
+      domain: params.domain,
+      localPart: params.localPart,
+    };
+    await fs.writeFile(authPath, JSON.stringify(authMap, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+
+    // 3. Update Postfix domains & vmailbox maps
+    const domainsPath = path.join(mailDir, "domains");
+    let domLines: string[] = [];
+    try {
+      domLines = (await fs.readFile(domainsPath, "utf8"))
+        .split(/\r?\n/)
+        .map((l) => l.trim().toLowerCase())
+        .filter(Boolean);
+    } catch {
+      domLines = [];
+    }
+    if (!domLines.includes(params.domain.toLowerCase())) {
+      domLines.push(params.domain.toLowerCase());
+      await fs.writeFile(domainsPath, domLines.join("\n") + "\n", "utf8");
+    }
+
+    const vmailboxPath = path.join(mailDir, "vmailbox");
+    let vmapLines: string[] = [];
+    try {
+      vmapLines = (await fs.readFile(vmailboxPath, "utf8"))
+        .split(/\r?\n/)
+        .filter((l) => l.trim().length > 0 && !l.startsWith(`${params.email} `));
+    } catch {
+      vmapLines = [];
+    }
+    vmapLines.push(`${params.email} ${params.domain}/${params.localPart}/Maildir/`);
+    await fs.writeFile(vmailboxPath, vmapLines.join("\n") + "\n", "utf8");
+
+    if (!this.isDryRun) {
+      await this.runSafeCommand("mail.postmap", "postmap", [vmailboxPath], {
+        allowFail: true,
+      });
+      await this.runSafeCommand(
+        "mail.chown_vmail",
+        "chown",
+        ["-R", "vmail:vmail", mailboxRoot],
+        { allowFail: true }
+      );
+      await this.runSafeCommand(
+        "mail.chown_passwd",
+        "chown",
+        ["root:dovecot", passwdPath],
+        { allowFail: true }
+      );
+    }
+
+    const auditEntry: CommandAuditEntry = {
+      id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      action: "mail.create_account",
+      binary: "wpcloud-maildir",
+      args: ["provision", params.email, `quota=${params.quotaMb}M`],
+      dryRun: this.isDryRun,
+      exitCode: 0,
+      stdout: `Provisioned Maildir & virtual auth for ${params.email}`,
+      stderr: "",
+    };
+    this.auditLog.unshift(auditEntry);
+
+    return { mailboxRoot, maildirRoot };
+  }
+
+  public async getMailboxDiskUsageMb(domain: string, localPart: string): Promise<number> {
+    const mailboxRoot = this.getMailboxRoot(domain, localPart);
+    let totalBytes = 0;
+
+    const walk = async (dir: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await walk(full);
+        } else if (entry.isFile()) {
+          try {
+            const st = await fs.stat(full);
+            totalBytes += st.size;
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
+
+    await walk(mailboxRoot);
+    return Math.max(1, Math.round(totalBytes / (1024 * 1024)));
+  }
+
+  public async getMailStackStatus(): Promise<MailStackStatus> {
+    if (this.isDryRun) {
+      return {
+        installed: false,
+        dovecot: false,
+        postfix: false,
+        opendkim: false,
+      };
+    }
+
+    const checkService = async (name: string): Promise<boolean> => {
+      const res = await this.runSafeCommand(
+        `mail.status_${name}`,
+        "systemctl",
+        ["is-active", "--quiet", name],
+        { allowFail: true }
+      );
+      return res.exitCode === 0;
+    };
+
+    const [dovecot, postfix, opendkim] = await Promise.all([
+      checkService("dovecot"),
+      checkService("postfix"),
+      checkService("opendkim"),
+    ]);
+
+    return {
+      installed: dovecot && postfix,
+      dovecot,
+      postfix,
+      opendkim,
+    };
+  }
+
+  public async configurePostfixRelay(
+    deliveryMode: "direct" | "relay",
+    relayConfig: { host: string; port: number; username: string; password: string }
+  ): Promise<void> {
+    if (this.isDryRun) return;
+
+    const hasPostconf = await this.runSafeCommand("mail.which_postconf", "which", ["postconf"], {
+      allowFail: true,
+    });
+    if (hasPostconf.exitCode !== 0) return;
+
+    const saslPasswdPath = path.join(this.wpcloudRoot, "mail", "relay_sasl_passwd");
+    if (deliveryMode === "relay" && relayConfig.host) {
+      const relayHostSpec = `[${relayConfig.host}]:${Number(relayConfig.port) || 587}`;
+      await fs.writeFile(
+        saslPasswdPath,
+        `${relayHostSpec} ${relayConfig.username}:${relayConfig.password}\n`,
+        { encoding: "utf8", mode: 0o600 }
+      );
+      await this.runSafeCommand("postfix.postmap_relay", "postmap", [saslPasswdPath], {
+        allowFail: true,
+      });
+      await this.runSafeCommand(
+        "postfix.set_relay",
+        "postconf",
+        [
+          "-e",
+          `relayhost=${relayHostSpec}`,
+          "smtp_sasl_auth_enable=yes",
+          `smtp_sasl_password_maps=hash:${saslPasswdPath}`,
+          "smtp_sasl_security_options=noanonymous",
+          "smtp_tls_security_level=encrypt",
+        ],
+        { allowFail: true }
+      );
+    } else {
+      await this.runSafeCommand(
+        "postfix.set_direct",
+        "postconf",
+        ["-e", "relayhost=", "smtp_sasl_auth_enable=no"],
+        { allowFail: true }
+      );
+    }
+
+    await this.runSafeCommand("postfix.reload", "systemctl", ["reload", "postfix"], {
+      allowFail: true,
+    });
+  }
+
+  /**
+   * Installs and configures Postfix (SMTP 25/587) + Dovecot (IMAP 993 + LMTP + SASL) + OpenDKIM
+   * on Ubuntu 24.04 LTS using isolated virtual mailbox configs under /opt/wpcloud/mail/.
+   */
+  public async setupMailServerStack(): Promise<MailStackStatus> {
+    await this.ensureDirectoryLayout();
+    if (this.isDryRun) {
+      return { installed: true, dovecot: true, postfix: true, opendkim: true };
+    }
+
+    const mailDir = path.join(this.wpcloudRoot, "mail");
+    const mailboxesDir = path.join(mailDir, "mailboxes");
+    const dkimDir = path.join(mailDir, "dkim");
+    await fs.mkdir(mailboxesDir, { recursive: true });
+    await fs.mkdir(dkimDir, { recursive: true });
+
+    // Ensure vmail user exists
+    const vmailCheck = await this.runSafeCommand("mail.vmail_check", "id", ["-u", "vmail"], {
+      allowFail: true,
+    });
+    if (vmailCheck.exitCode !== 0) {
+      await this.runSafeCommand("mail.vmail_create", "useradd", [
+        "--system",
+        "--home-dir",
+        mailDir,
+        "--shell",
+        "/usr/sbin/nologin",
+        "vmail",
+      ]);
+    }
+
+    // Install packages non-interactively if missing
+    const dovecotCheck = await this.runSafeCommand(
+      "mail.pkg_check",
+      "dpkg",
+      ["-s", "dovecot-imapd", "postfix", "opendkim"],
+      { allowFail: true }
+    );
+    if (dovecotCheck.exitCode !== 0) {
+      const hostname = os.hostname() || "mail.localhost";
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn("debconf-set-selections", [], { stdio: ["pipe", "pipe", "pipe"] });
+        child.on("close", (code) =>
+          code === 0 ? resolve() : reject(new Error(`debconf-set-selections failed (${code})`))
+        );
+        child.on("error", reject);
+        child.stdin.write(
+          `postfix postfix/mailname string ${hostname}\npostfix postfix/main_mailer_type string 'Internet Site'\n`
+        );
+        child.stdin.end();
+      });
+
+      await this.runSafeCommand("mail.apt_update", "apt-get", ["update", "-y", "-q"]);
+      await this.runSafeCommand("mail.apt_install", "apt-get", [
+        "install",
+        "-y",
+        "-q",
+        "postfix",
+        "dovecot-imapd",
+        "dovecot-lmtpd",
+        "opendkim",
+        "opendkim-tools",
+      ]);
+    }
+
+    // Ensure base files exist
+    const passwdPath = path.join(mailDir, "users.passwd");
+    const domainsPath = path.join(mailDir, "domains");
+    const vmailboxPath = path.join(mailDir, "vmailbox");
+    for (const file of [passwdPath, domainsPath, vmailboxPath]) {
+      try {
+        await fs.access(file);
+      } catch {
+        await fs.writeFile(file, "", "utf8");
+      }
+    }
+
+    await this.runSafeCommand("mail.chown_mailboxes", "chown", ["-R", "vmail:vmail", mailboxesDir], {
+      allowFail: true,
+    });
+    await this.runSafeCommand("mail.chown_passwd", "chown", ["root:dovecot", passwdPath], {
+      allowFail: true,
+    });
+    await this.runSafeCommand("mail.chmod_passwd", "chmod", ["640", passwdPath], {
+      allowFail: true,
+    });
+
+    const vmailUidRes = await this.runSafeCommand("mail.vmail_uid", "id", ["-u", "vmail"]);
+    const vmailGidRes = await this.runSafeCommand("mail.vmail_gid", "id", ["-g", "vmail"]);
+    const vmailUid = vmailUidRes.stdout.trim() || "5000";
+    const vmailGid = vmailGidRes.stdout.trim() || "5000";
+
+    const sslCert = path.join(this.wpcloudRoot, "ssl", "panel", "cert.pem");
+    const sslKey = path.join(this.wpcloudRoot, "ssl", "panel", "key.pem");
+
+    // Configure Dovecot
+    const dovecotConf = `# Managed by WPCloud — Isolated Virtual Mailboxes in ${mailDir}
+protocols = imap lmtp
+mail_location = maildir:${mailboxesDir}/%d/%n/Maildir
+mail_uid = ${vmailUid}
+mail_gid = ${vmailGid}
+first_valid_uid = 100
+ssl = yes
+ssl_cert = <${sslCert}
+ssl_key = <${sslKey}
+auth_mechanisms = plain login
+
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u ${passwdPath}
+}
+
+userdb {
+  driver = passwd-file
+  args = username_format=%u ${passwdPath}
+}
+
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+`;
+    await fs.writeFile("/etc/dovecot/conf.d/99-wpcloud.conf", dovecotConf, "utf8");
+
+    // Configure Postfix
+    await this.runSafeCommand("mail.postmap_vmailbox", "postmap", [vmailboxPath]);
+    await this.runSafeCommand("mail.postconf", "postconf", [
+      "-e",
+      `virtual_mailbox_domains=${domainsPath}`,
+      `virtual_mailbox_maps=hash:${vmailboxPath}`,
+      "virtual_transport=lmtp:unix:private/dovecot-lmtp",
+      "smtpd_sasl_type=dovecot",
+      "smtpd_sasl_path=private/auth",
+      "smtpd_sasl_auth_enable=yes",
+      `smtpd_tls_cert_file=${sslCert}`,
+      `smtpd_tls_key_file=${sslKey}`,
+      "smtpd_tls_security_level=may",
+      "smtp_tls_security_level=may",
+      "milter_default_action=accept",
+      "milter_protocol=6",
+      "smtpd_milters=inet:localhost:8891",
+      "non_smtpd_milters=inet:localhost:8891",
+    ]);
+
+    await this.runSafeCommand(
+      "mail.postfix_submission",
+      "postconf",
+      [
+        "-M",
+        "submission/inet=submission inet n - y - - smtpd",
+        "-P",
+        "submission/inet/syslog_name=postfix/submission",
+        "submission/inet/smtpd_tls_security_level=encrypt",
+        "submission/inet/smtpd_sasl_auth_enable=yes",
+        "submission/inet/smtpd_client_restrictions=permit_sasl_authenticated,reject",
+      ],
+      { allowFail: true }
+    );
+
+    // Configure OpenDKIM
+    const trustedHostsPath = path.join(dkimDir, "TrustedHosts");
+    const keyTablePath = path.join(dkimDir, "KeyTable");
+    const signingTablePath = path.join(dkimDir, "SigningTable");
+    await fs.writeFile(trustedHostsPath, "127.0.0.1\nlocalhost\n", "utf8");
+    try {
+      await fs.access(keyTablePath);
+    } catch {
+      await fs.writeFile(keyTablePath, "", "utf8");
+    }
+    try {
+      await fs.access(signingTablePath);
+    } catch {
+      await fs.writeFile(signingTablePath, "", "utf8");
+    }
+
+    const opendkimConf = `# Managed by WPCloud
+Syslog yes
+UMask 007
+Socket inet:8891@localhost
+PidFile /run/opendkim/opendkim.pid
+TrustAnchorFile /usr/share/dns/root.key
+UserID opendkim
+Mode sv
+SubDomains no
+AutoRestart yes
+AutoRestartRate 10/1M
+SignatureAlgorithm rsa-sha256
+KeyTable file:${keyTablePath}
+SigningTable refile:${signingTablePath}
+ExternalIgnoreList file:${trustedHostsPath}
+InternalHosts file:${trustedHostsPath}
+`;
+    await fs.writeFile("/etc/opendkim.conf", opendkimConf, "utf8");
+    await this.syncOpenDkimTables();
+
+    // Open standard mail ports in UFW if active
+    for (const port of ["25/tcp", "465/tcp", "587/tcp", "993/tcp"]) {
+      await this.runSafeCommand("mail.ufw", "ufw", ["allow", port, "comment", "WPCloud Mail"], {
+        allowFail: true,
+      });
+    }
+
+    await this.runSafeCommand("mail.restart_dovecot", "systemctl", ["enable", "--now", "dovecot"]);
+    await this.runSafeCommand("mail.restart_dovecot_reload", "systemctl", ["restart", "dovecot"]);
+    await this.runSafeCommand("mail.restart_opendkim", "systemctl", ["enable", "--now", "opendkim"], {
+      allowFail: true,
+    });
+    await this.runSafeCommand("mail.restart_opendkim_reload", "systemctl", ["restart", "opendkim"], {
+      allowFail: true,
+    });
+    await this.runSafeCommand("mail.restart_postfix", "systemctl", ["enable", "--now", "postfix"]);
+    await this.runSafeCommand("mail.restart_postfix_reload", "systemctl", ["restart", "postfix"]);
+
+    return this.getMailStackStatus();
   }
 }
 
